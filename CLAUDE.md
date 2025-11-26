@@ -76,115 +76,173 @@ The Android app runs **100% on-device** except for LLM inference:
 3. CIRISProxy holds Groq/Together keys server-side
 4. Credits are actually enforced per LLM request
 
-## Credit Model - CRITICAL DECISION NEEDED
+## Credit Model: 1 Credit = 1 Interaction
+
+**CIRISBilling already supports this!** The key is `idempotency_key` on the charge endpoint.
 
 The on-device agent makes **multiple LLM calls per user interaction**:
 
 ```
 User sends "Research climate change" →
   On-device agent processes →
-    LLM call 1: Think about approach
-    LLM call 2: Use search tool
-    LLM call 3: Process search results
-    LLM call 4: Use another tool
-    ... (12-70 calls typical)
-    LLM call N: Final response
+    LLM call 1: Think about approach        ─┐
+    LLM call 2: Use search tool              │
+    LLM call 3: Process search results       │ ALL share same interaction_id
+    LLM call 4: Use another tool             │ Only FIRST charge succeeds
+    ... (12-70 calls typical)                │ Rest are idempotent no-ops
+    LLM call N: Final response              ─┘
 → User sees response
+→ User is charged exactly 1 credit
 ```
 
-### Option A: 1 Credit = 1 LLM Request (Simple)
-```
-Each /chat/completions call = 1 credit
-- Simple to implement (pre-check, post-charge per request)
-- User pays for actual compute used
-- Problem: Complex interaction = 50+ credits
-- Problem: Users can't predict costs
+### How It Works
+
+1. **Android app generates `interaction_id`** when user sends a message
+2. **Every LLM call includes the same `interaction_id`** in metadata
+3. **CIRISProxy calls `/litellm/charge`** with `idempotency_key = "litellm:{interaction_id}"`
+4. **First call succeeds**, deducts 1 credit (100 minor units)
+5. **Subsequent calls with same interaction_id** return success but don't charge again
+
+From `CIRISBilling/app/api/routes.py:1224`:
+```python
+# Default idempotency key ensures same interaction = one charge
+idempotency_key = request.idempotency_key or f"litellm:{request.interaction_id}"
 ```
 
-### Option B: 1 Credit = 1 Interaction (User-Friendly)
-```
-All LLM calls for one interaction = 1 credit
-- Requires interaction_id tracking
-- Requires aggregation layer in CIRISProxy
-- User sees predictable "1 credit per question"
-- Problem: How to detect interaction boundaries?
-```
-
-### Option C: Credit Bundles (Hybrid)
-```
-1 credit = N LLM calls (e.g., 10 calls)
-- Partial credits tracked
-- Simpler than full aggregation
-- Still somewhat predictable
+From `routes.py:1260-1267` - IdempotencyConflictError returns success:
+```python
+except IdempotencyConflictError as exc:
+    # Already charged - return success (idempotent)
+    return LiteLLMChargeResponse(
+        charged=True,
+        credits_deducted=1,
+        credits_remaining=0,  # Unknown, but charge was successful
+        charge_id=exc.existing_id,
+    )
 ```
 
-### Recommended: Option A with Rate Limiting
+### Implementation in CIRISProxy
 
-For MVP, simplest is **1 credit = 1 LLM request**, but with:
-1. Low-cost models only (Groq Llama-3.1-8B-instant is nearly free)
-2. Generous credit bundles (100 credits = $0.99)
-3. Rate limiting (max 100 requests/minute per user)
-4. Clear pricing: "~50 credits per complex question"
+```python
+# Pre-call: Auth check (can be cached per interaction)
+# Only call once per interaction, not per LLM request
+if interaction_id not in self._authorized_interactions:
+    auth_result = await self._check_auth(external_id, interaction_id)
+    if auth_result.authorized:
+        self._authorized_interactions[interaction_id] = True
+    else:
+        raise Exception("Insufficient credits")
 
-The CIRISBilling `/litellm/auth`, `/litellm/charge`, `/litellm/usage` endpoints
-already support this model - they just need to be called per-request.
+# Post-call: Charge (idempotent - safe to call multiple times)
+await self._charge(external_id, interaction_id)
+# First call charges 1 credit, subsequent calls are no-ops
+```
+
+### Android App Integration
+
+The Android app needs to:
+1. Generate `interaction_id` (UUID) when user sends a message
+2. Include it in metadata for all LLM calls in that interaction
+3. Clear it when interaction completes
+
+```kotlin
+// In mobile_main.py or the LLM client layer
+class LLMClient:
+    def __init__(self):
+        self._current_interaction_id: str | None = None
+
+    def start_interaction(self) -> str:
+        """Called when user sends a message."""
+        self._current_interaction_id = str(uuid4())
+        return self._current_interaction_id
+
+    def get_interaction_id(self) -> str:
+        """Include in every LLM call metadata."""
+        if not self._current_interaction_id:
+            self._current_interaction_id = str(uuid4())
+        return self._current_interaction_id
+
+    def end_interaction(self):
+        """Called when agent response is complete."""
+        self._current_interaction_id = None
+```
 
 ## Integration with CIRISBilling
 
-CIRISProxy calls these CIRISBilling endpoints **per LLM request**:
+CIRISProxy calls these endpoints with **idempotent per-interaction charging**:
 
-### 1. Pre-Request Authorization (Before proxying)
+### 1. Pre-Request Authorization (Once per interaction)
 ```
 POST https://billing.ciris.ai/v1/billing/litellm/auth
 {
     "oauth_provider": "oauth:google",
-    "external_id": "user-google-id",       // From Authorization header
-    "model": "groq/llama-3.1-70b"           // From request body
+    "external_id": "user-google-id",
+    "model": "groq/llama-3.1-70b",
+    "interaction_id": "int-uuid-456"         // Same for all calls in interaction
 }
 
 Response:
 {
     "authorized": true,
-    "credits_remaining": 10
+    "credits_remaining": 10,
+    "interaction_id": "int-uuid-456"
 }
-
-If authorized=false, return 402 Payment Required to client.
 ```
 
-### 2. Post-Request Charge (After successful response)
+Cache this result in CIRISProxy for the duration of the interaction.
+Only check once when `interaction_id` is first seen.
+
+### 2. Post-Request Charge (Idempotent per interaction)
 ```
 POST https://billing.ciris.ai/v1/billing/litellm/charge
 {
     "oauth_provider": "oauth:google",
     "external_id": "user-google-id",
-    "interaction_id": "<unique-request-id>",  // Generated per request
-    "idempotency_key": "<litellm-call-id>"    // Prevent double-charging on retry
+    "interaction_id": "int-uuid-456"         // SAME for all calls!
+    // idempotency_key defaults to "litellm:{interaction_id}"
 }
 
-Response:
+First call response:
 {
     "charged": true,
     "credits_deducted": 1,
     "credits_remaining": 9,
     "charge_id": "uuid"
 }
+
+Subsequent calls (same interaction_id) response:
+{
+    "charged": true,                         // Still returns true!
+    "credits_deducted": 1,
+    "credits_remaining": 0,                  // Unknown but charge exists
+    "charge_id": "existing-uuid"             // Returns existing charge
+}
 ```
 
-### 3. Usage Analytics (Optional, for margin tracking)
+**Key insight:** Call charge on EVERY LLM request. The idempotency_key ensures
+only the first call actually deducts credits. This is simpler than tracking
+"first call" vs "subsequent calls" in CIRISProxy.
+
+### 3. Usage Analytics (Aggregate per interaction)
 ```
 POST https://billing.ciris.ai/v1/billing/litellm/usage
 {
     "oauth_provider": "oauth:google",
     "external_id": "user-google-id",
-    "interaction_id": "<request-id>",
-    "total_llm_calls": 1,
-    "total_prompt_tokens": 1500,
-    "total_completion_tokens": 200,
-    "models_used": ["groq/llama-3.1-70b"],
-    "actual_cost_cents": 0,                    // Groq is free tier
-    "duration_ms": 850
+    "interaction_id": "int-uuid-456",
+    "total_llm_calls": 45,                   // Total calls in this interaction
+    "total_prompt_tokens": 80000,
+    "total_completion_tokens": 5000,
+    "models_used": ["groq/llama-3.1-70b", "together/mixtral"],
+    "actual_cost_cents": 12,
+    "duration_ms": 8500,
+    "error_count": 2,
+    "fallback_count": 3
 }
 ```
+
+Call this ONCE at the end of the interaction with aggregated totals.
+This gives you margin analytics (user paid 1 credit, you paid 12 cents).
 
 ## Implementation Requirements
 
@@ -197,30 +255,69 @@ CIRISProxy uses LiteLLM's `CustomLogger` for billing integration:
 from litellm.integrations.custom_logger import CustomLogger
 import httpx
 import os
-from uuid import uuid4
+from collections import defaultdict
 
 class CIRISBillingCallback(CustomLogger):
+    """
+    LiteLLM callback that integrates with CIRISBilling.
+
+    Key design: 1 credit = 1 interaction (not 1 LLM call)
+    Uses interaction_id + idempotency to ensure single charge per interaction.
+    """
+
     def __init__(self):
         self.billing_url = os.environ.get("BILLING_API_URL", "https://billing.ciris.ai")
         self.billing_key = os.environ.get("BILLING_API_KEY")
 
+        # Cache authorized interactions to avoid repeated auth checks
+        self._authorized_interactions: dict[str, bool] = {}
+
+        # Aggregate usage per interaction for final logging
+        self._interaction_usage: dict[str, dict] = defaultdict(lambda: {
+            "llm_calls": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "models": set(),
+            "cost_cents": 0,
+            "duration_ms": 0,
+            "errors": 0,
+            "fallbacks": 0,
+        })
+
     async def async_pre_call_hook(self, user_api_key_dict, cache, data, call_type):
-        """Pre-request: Verify user has credits."""
-        # Extract Google user ID from Authorization header
-        # Format: "Bearer google:<user-id>" or just the user ID
+        """Pre-request: Verify user has credits (cached per interaction)."""
+
+        # Extract user identity
         user_key = user_api_key_dict.get("api_key", "")
         if user_key.startswith("google:"):
             external_id = user_key.split(":", 1)[1]
         else:
             external_id = user_key
 
+        # Get interaction_id from request metadata (set by on-device agent)
+        metadata = data.get("metadata", {})
+        interaction_id = metadata.get("interaction_id")
+
+        if not interaction_id:
+            raise Exception("Missing interaction_id in request metadata")
+
+        # Store for post-call
+        data["_ciris_external_id"] = external_id
+        data["_ciris_interaction_id"] = interaction_id
+
+        # Check if already authorized for this interaction (cache hit)
+        if interaction_id in self._authorized_interactions:
+            return  # Already checked, proceed
+
+        # First LLM call for this interaction - check auth
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 f"{self.billing_url}/v1/billing/litellm/auth",
                 json={
                     "oauth_provider": "oauth:google",
                     "external_id": external_id,
-                    "model": data.get("model")
+                    "model": data.get("model"),
+                    "interaction_id": interaction_id,
                 },
                 headers={"Authorization": f"Bearer {self.billing_key}"},
                 timeout=5.0
@@ -230,52 +327,89 @@ class CIRISBillingCallback(CustomLogger):
         if not result.get("authorized"):
             raise Exception(f"Insufficient credits: {result.get('reason', 'No credits')}")
 
-        # Store external_id for post-call
-        data["_ciris_external_id"] = external_id
-        data["_ciris_request_id"] = str(uuid4())
+        # Cache authorization for this interaction
+        self._authorized_interactions[interaction_id] = True
 
     async def async_log_success_event(self, kwargs, response_obj, start_time, end_time):
-        """Post-success: Charge 1 credit."""
-        external_id = kwargs.get("litellm_params", {}).get("metadata", {}).get("_ciris_external_id")
-        request_id = kwargs.get("litellm_params", {}).get("metadata", {}).get("_ciris_request_id")
+        """Post-success: Charge and aggregate usage."""
 
-        if not external_id:
-            return  # Can't charge without user ID
+        metadata = kwargs.get("litellm_params", {}).get("metadata", {})
+        external_id = metadata.get("_ciris_external_id")
+        interaction_id = metadata.get("_ciris_interaction_id")
 
+        if not external_id or not interaction_id:
+            return
+
+        # Charge (idempotent - first call charges, rest are no-ops)
         async with httpx.AsyncClient() as client:
-            # Charge the credit
             await client.post(
                 f"{self.billing_url}/v1/billing/litellm/charge",
                 json={
                     "oauth_provider": "oauth:google",
                     "external_id": external_id,
-                    "interaction_id": request_id,
-                    "idempotency_key": kwargs.get("litellm_call_id")
+                    "interaction_id": interaction_id,
+                    # idempotency_key defaults to "litellm:{interaction_id}"
                 },
                 headers={"Authorization": f"Bearer {self.billing_key}"},
                 timeout=5.0
             )
 
-            # Log usage for analytics
-            usage = getattr(response_obj, "usage", None)
-            if usage:
-                duration_ms = int((end_time - start_time).total_seconds() * 1000)
-                await client.post(
-                    f"{self.billing_url}/v1/billing/litellm/usage",
-                    json={
-                        "oauth_provider": "oauth:google",
-                        "external_id": external_id,
-                        "interaction_id": request_id,
-                        "total_llm_calls": 1,
-                        "total_prompt_tokens": getattr(usage, "prompt_tokens", 0),
-                        "total_completion_tokens": getattr(usage, "completion_tokens", 0),
-                        "models_used": [kwargs.get("model", "unknown")],
-                        "actual_cost_cents": int(response_obj._hidden_params.get("response_cost", 0) * 100),
-                        "duration_ms": duration_ms
-                    },
-                    headers={"Authorization": f"Bearer {self.billing_key}"},
-                    timeout=5.0
-                )
+        # Aggregate usage for this interaction
+        usage_data = self._interaction_usage[interaction_id]
+        usage_data["llm_calls"] += 1
+
+        usage = getattr(response_obj, "usage", None)
+        if usage:
+            usage_data["prompt_tokens"] += getattr(usage, "prompt_tokens", 0)
+            usage_data["completion_tokens"] += getattr(usage, "completion_tokens", 0)
+
+        usage_data["models"].add(kwargs.get("model", "unknown"))
+        usage_data["cost_cents"] += int(
+            response_obj._hidden_params.get("response_cost", 0) * 100
+        )
+        usage_data["duration_ms"] += int(
+            (end_time - start_time).total_seconds() * 1000
+        )
+
+    async def async_log_failure_event(self, kwargs, response_obj, start_time, end_time):
+        """Track errors for usage logging."""
+        metadata = kwargs.get("litellm_params", {}).get("metadata", {})
+        interaction_id = metadata.get("_ciris_interaction_id")
+
+        if interaction_id:
+            self._interaction_usage[interaction_id]["errors"] += 1
+
+    async def finalize_interaction(self, external_id: str, interaction_id: str):
+        """
+        Call this when interaction completes to log aggregated usage.
+        Should be triggered by the on-device agent signaling completion.
+        """
+        usage_data = self._interaction_usage.pop(interaction_id, None)
+        if not usage_data:
+            return
+
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                f"{self.billing_url}/v1/billing/litellm/usage",
+                json={
+                    "oauth_provider": "oauth:google",
+                    "external_id": external_id,
+                    "interaction_id": interaction_id,
+                    "total_llm_calls": usage_data["llm_calls"],
+                    "total_prompt_tokens": usage_data["prompt_tokens"],
+                    "total_completion_tokens": usage_data["completion_tokens"],
+                    "models_used": list(usage_data["models"]),
+                    "actual_cost_cents": usage_data["cost_cents"],
+                    "duration_ms": usage_data["duration_ms"],
+                    "error_count": usage_data["errors"],
+                    "fallback_count": usage_data["fallbacks"],
+                },
+                headers={"Authorization": f"Bearer {self.billing_key}"},
+                timeout=5.0
+            )
+
+        # Clean up auth cache
+        self._authorized_interactions.pop(interaction_id, None)
 ```
 
 ### Environment Variables
