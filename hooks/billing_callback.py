@@ -249,7 +249,7 @@ class CIRISBillingCallback(CustomLogger):
                 },
             )
 
-            if resp.status_code == 200:
+            if resp.status_code in (200, 201):
                 result = resp.json()
                 logger.debug(
                     "interaction=%s charge=%s",
