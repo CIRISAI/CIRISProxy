@@ -52,11 +52,11 @@ model_list:
       api_key: "os.environ/OPENAI_API_KEY"
 
   # Aliases for simpler client usage
-  # Default model for CIRIS Agent - Llama 4 Maverick
+  # Default model for CIRIS Agent - Groq Llama 3.3 70B (fast and reliable)
   - model_name: "default"
     litellm_params:
-      model: "together_ai/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
-      api_key: "os.environ/TOGETHER_API_KEY"
+      model: "groq/llama-3.3-70b-versatile"
+      api_key: "os.environ/GROQ_API_KEY"
 
   - model_name: "fast"
     litellm_params:
@@ -91,6 +91,7 @@ router_settings:
 
   # Fallback chain
   fallbacks:
+    - "default": ["together/llama-3.1-70b", "openai/gpt-4o-mini"]
     - "llama-4-maverick": ["groq/llama-4-maverick", "together/llama-3.1-70b"]
     - "groq/llama-3.3-70b": ["together/llama-3.1-70b", "openai/gpt-4o-mini"]
 
