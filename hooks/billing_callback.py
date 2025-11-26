@@ -1,0 +1,423 @@
+"""
+CIRISBilling Integration Callback for LiteLLM
+
+Key design: 1 credit = 1 interaction (not 1 LLM call)
+Uses interaction_id + idempotency to ensure single charge per interaction.
+
+The on-device CIRIS Agent makes 12-70 LLM calls per user interaction.
+All calls share the same interaction_id. CIRISBilling's idempotency ensures
+only the first /charge call deducts credits; subsequent calls are no-ops.
+
+SECURITY NOTE: This callback MUST NOT log any PII including:
+- User IDs (external_id, Google IDs)
+- API keys
+- Message content
+- Full request/response bodies
+Only log: interaction_id, model names, token counts, status codes, timing
+"""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import os
+from collections import defaultdict
+from datetime import datetime, timezone
+from typing import Any
+
+import httpx
+from litellm.integrations.custom_logger import CustomLogger
+
+logger = logging.getLogger(__name__)
+
+
+def _hash_id(user_id: str) -> str:
+    """Hash user ID for safe logging. Only first 8 chars of hash shown."""
+    if not user_id:
+        return "unknown"
+    return hashlib.sha256(user_id.encode()).hexdigest()[:8]
+
+
+class CIRISBillingCallback(CustomLogger):
+    """
+    LiteLLM callback that integrates with CIRISBilling.
+
+    Auth Flow:
+    1. Extract user identity from API key (format: "google:{user_id}")
+    2. Extract interaction_id from request metadata
+    3. On first call per interaction: verify credits via /litellm/auth
+    4. On every call: charge via /litellm/charge (idempotent)
+    5. On interaction end: log aggregated usage via /litellm/usage
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.billing_url = os.environ.get("BILLING_API_URL", "https://billing.ciris.ai")
+        self.billing_key = os.environ.get("BILLING_API_KEY", "")
+
+        # Cache authorized interactions to avoid repeated auth checks
+        # Key: interaction_id, Value: True
+        self._authorized_interactions: dict[str, bool] = {}
+
+        # Aggregate usage per interaction for final logging
+        # Key: interaction_id, Value: usage dict
+        self._interaction_usage: dict[str, dict[str, Any]] = defaultdict(
+            lambda: {
+                "external_id": "",
+                "llm_calls": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "models": set(),
+                "cost_cents": 0.0,
+                "duration_ms": 0,
+                "errors": 0,
+                "fallbacks": 0,
+                "start_time": None,
+            }
+        )
+
+        # HTTP client for billing API calls
+        self._client: httpx.AsyncClient | None = None
+
+        logger.info(
+            "CIRISBillingCallback initialized, billing_url=%s",
+            self.billing_url,
+        )
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Get or create the HTTP client."""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(10.0, connect=5.0),
+                headers={"X-API-Key": self.billing_key},
+            )
+        return self._client
+
+    def _parse_user_key(self, api_key: str) -> tuple[str, str]:
+        """
+        Parse the API key to extract OAuth provider and external ID.
+
+        Expected format: "google:{user_id}" or just "{user_id}"
+        Returns: (oauth_provider, external_id)
+        """
+        if not api_key:
+            return "oauth:google", ""
+
+        if api_key.startswith("google:"):
+            return "oauth:google", api_key[7:]  # len("google:") = 7
+        elif ":" in api_key:
+            provider, user_id = api_key.split(":", 1)
+            return f"oauth:{provider}", user_id
+        else:
+            # Assume it's just the user ID with Google OAuth
+            return "oauth:google", api_key
+
+    async def async_pre_call_hook(
+        self,
+        user_api_key_dict: Any,  # Can be dict or UserAPIKeyAuth Pydantic model
+        cache: Any,
+        data: dict[str, Any],
+        call_type: str,
+    ) -> None:
+        """
+        Pre-request: Verify user has credits (cached per interaction).
+
+        Called before every LLM request. We cache the auth result per
+        interaction_id to avoid hammering the billing API.
+        """
+        # Extract user identity from the Authorization header
+        # Handle both dict and UserAPIKeyAuth Pydantic model
+        if hasattr(user_api_key_dict, "api_key"):
+            api_key = user_api_key_dict.api_key or ""
+        elif isinstance(user_api_key_dict, dict):
+            api_key = user_api_key_dict.get("api_key", "")
+        else:
+            api_key = ""
+        oauth_provider, external_id = self._parse_user_key(api_key)
+
+        if not external_id:
+            logger.warning("Auth denied: missing user identifier in API key")
+            raise Exception("Invalid API key format. Expected: google:{user_id}")
+
+        # Get interaction_id from request metadata (set by on-device agent)
+        metadata = data.get("metadata", {})
+        interaction_id = metadata.get("interaction_id")
+
+        if not interaction_id:
+            logger.warning("Auth denied: missing interaction_id")
+            raise Exception(
+                "Missing interaction_id in request metadata. "
+                "The on-device agent must set metadata.interaction_id for each interaction."
+            )
+
+        # Store for post-call hooks
+        if "metadata" not in data:
+            data["metadata"] = {}
+        data["metadata"]["_ciris_oauth_provider"] = oauth_provider
+        data["metadata"]["_ciris_external_id"] = external_id
+        data["metadata"]["_ciris_interaction_id"] = interaction_id
+
+        # Initialize usage tracking for this interaction
+        if interaction_id not in self._interaction_usage:
+            self._interaction_usage[interaction_id]["external_id"] = external_id
+            self._interaction_usage[interaction_id]["start_time"] = datetime.now(timezone.utc)
+
+        # Check if already authorized for this interaction (cache hit)
+        if interaction_id in self._authorized_interactions:
+            logger.debug("interaction=%s auth=cached", interaction_id)
+            return
+
+        # First LLM call for this interaction - check auth with billing service
+        logger.debug("interaction=%s auth=checking", interaction_id)
+
+        try:
+            client = await self._get_client()
+            resp = await client.post(
+                f"{self.billing_url}/v1/billing/litellm/auth",
+                json={
+                    "oauth_provider": oauth_provider,
+                    "external_id": external_id,
+                    "model": data.get("model", "unknown"),
+                    "interaction_id": interaction_id,
+                },
+            )
+
+            if resp.status_code != 200:
+                logger.error(
+                    "interaction=%s billing_auth=error status=%d",
+                    interaction_id,
+                    resp.status_code,
+                )
+                raise Exception(f"Billing service error: {resp.status_code}")
+
+            result = resp.json()
+
+            if not result.get("authorized"):
+                reason = result.get("reason", "Insufficient credits")
+                logger.info(
+                    "interaction=%s auth=denied reason=%s",
+                    interaction_id,
+                    reason,
+                )
+                raise Exception(f"Insufficient credits: {reason}")
+
+            # Cache authorization for this interaction
+            self._authorized_interactions[interaction_id] = True
+            logger.info(
+                "interaction=%s auth=granted credits=%s",
+                interaction_id,
+                result.get("credits_remaining"),
+            )
+
+        except httpx.RequestError as e:
+            # Network error - fail closed (deny access)
+            logger.error("interaction=%s billing=unreachable error_type=%s", interaction_id, type(e).__name__)
+            raise Exception("Billing service unavailable. Please try again later.")
+
+    async def async_log_success_event(
+        self,
+        kwargs: dict[str, Any],
+        response_obj: Any,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> None:
+        """
+        Post-success: Charge and aggregate usage.
+
+        Called after every successful LLM response. We call /charge on every
+        request (idempotent) and aggregate usage for final logging.
+        """
+        litellm_params = kwargs.get("litellm_params", {})
+        metadata = litellm_params.get("metadata", {})
+
+        oauth_provider = metadata.get("_ciris_oauth_provider")
+        external_id = metadata.get("_ciris_external_id")
+        interaction_id = metadata.get("_ciris_interaction_id")
+
+        if not external_id or not interaction_id:
+            return
+
+        # Charge the interaction (idempotent - first call charges, rest are no-ops)
+        try:
+            client = await self._get_client()
+            resp = await client.post(
+                f"{self.billing_url}/v1/billing/litellm/charge",
+                json={
+                    "oauth_provider": oauth_provider,
+                    "external_id": external_id,
+                    "interaction_id": interaction_id,
+                },
+            )
+
+            if resp.status_code == 200:
+                result = resp.json()
+                logger.debug(
+                    "interaction=%s charge=%s",
+                    interaction_id,
+                    "new" if result.get("charged") else "idempotent",
+                )
+            else:
+                logger.warning(
+                    "interaction=%s charge=failed status=%d",
+                    interaction_id,
+                    resp.status_code,
+                )
+
+        except httpx.RequestError as e:
+            logger.error("interaction=%s charge=error error_type=%s", interaction_id, type(e).__name__)
+
+        # Aggregate usage for this interaction
+        usage_data = self._interaction_usage[interaction_id]
+        usage_data["llm_calls"] += 1
+
+        # Extract token usage from response
+        usage = getattr(response_obj, "usage", None)
+        if usage:
+            usage_data["prompt_tokens"] += getattr(usage, "prompt_tokens", 0) or 0
+            usage_data["completion_tokens"] += (
+                getattr(usage, "completion_tokens", 0) or 0
+            )
+
+        # Track model used
+        model = kwargs.get("model", "unknown")
+        usage_data["models"].add(model)
+
+        # Track cost (LiteLLM calculates this automatically)
+        hidden_params = getattr(response_obj, "_hidden_params", {})
+        if isinstance(hidden_params, dict):
+            cost = hidden_params.get("response_cost", 0) or 0
+            usage_data["cost_cents"] += cost * 100  # Convert dollars to cents
+
+        # Track duration
+        if start_time and end_time:
+            duration_ms = int((end_time - start_time).total_seconds() * 1000)
+            usage_data["duration_ms"] += duration_ms
+
+        logger.debug(
+            "interaction=%s calls=%d model=%s tokens=%d/%d",
+            interaction_id,
+            usage_data["llm_calls"],
+            model,
+            usage_data["prompt_tokens"],
+            usage_data["completion_tokens"],
+        )
+
+    async def async_log_failure_event(
+        self,
+        kwargs: dict[str, Any],
+        response_obj: Any,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> None:
+        """Track errors for usage logging."""
+        litellm_params = kwargs.get("litellm_params", {})
+        metadata = litellm_params.get("metadata", {})
+        interaction_id = metadata.get("_ciris_interaction_id")
+
+        if interaction_id and interaction_id in self._interaction_usage:
+            self._interaction_usage[interaction_id]["errors"] += 1
+            logger.debug("interaction=%s event=error", interaction_id)
+
+    async def finalize_interaction(
+        self,
+        external_id: str,
+        interaction_id: str,
+        oauth_provider: str = "oauth:google",
+    ) -> None:
+        """
+        Call this when interaction completes to log aggregated usage.
+
+        Should be triggered by the on-device agent signaling completion.
+        This could be via a dedicated endpoint or a special metadata flag.
+        """
+        usage_data = self._interaction_usage.pop(interaction_id, None)
+        if not usage_data:
+            return
+
+        # Calculate total duration from start to now
+        start_time = usage_data.get("start_time")
+        if start_time:
+            total_duration_ms = int(
+                (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
+            )
+        else:
+            total_duration_ms = usage_data["duration_ms"]
+
+        try:
+            client = await self._get_client()
+            resp = await client.post(
+                f"{self.billing_url}/v1/billing/litellm/usage",
+                json={
+                    "oauth_provider": oauth_provider,
+                    "external_id": external_id,
+                    "interaction_id": interaction_id,
+                    "total_llm_calls": usage_data["llm_calls"],
+                    "total_prompt_tokens": usage_data["prompt_tokens"],
+                    "total_completion_tokens": usage_data["completion_tokens"],
+                    "models_used": list(usage_data["models"]),
+                    "actual_cost_cents": int(usage_data["cost_cents"]),
+                    "duration_ms": total_duration_ms,
+                    "error_count": usage_data["errors"],
+                    "fallback_count": usage_data["fallbacks"],
+                },
+            )
+
+            if resp.status_code == 200:
+                logger.info(
+                    "interaction=%s usage_logged=true calls=%d tokens=%d cost_cents=%.2f",
+                    interaction_id,
+                    usage_data["llm_calls"],
+                    usage_data["prompt_tokens"] + usage_data["completion_tokens"],
+                    usage_data["cost_cents"],
+                )
+            else:
+                logger.warning(
+                    "interaction=%s usage_logged=false status=%d",
+                    interaction_id,
+                    resp.status_code,
+                )
+
+        except httpx.RequestError as e:
+            logger.error("interaction=%s usage_log=error error_type=%s", interaction_id, type(e).__name__)
+
+        # Clean up auth cache
+        self._authorized_interactions.pop(interaction_id, None)
+
+    async def cleanup_stale_interactions(self, max_age_seconds: int = 3600) -> None:
+        """
+        Clean up interactions that have been open for too long.
+
+        Call periodically to prevent memory leaks from abandoned interactions.
+        """
+        now = datetime.now(timezone.utc)
+        stale_ids = []
+
+        for interaction_id, usage_data in self._interaction_usage.items():
+            start_time = usage_data.get("start_time")
+            if start_time:
+                age_seconds = (now - start_time).total_seconds()
+                if age_seconds > max_age_seconds:
+                    stale_ids.append(interaction_id)
+
+        for interaction_id in stale_ids:
+            usage_data = self._interaction_usage.get(interaction_id, {})
+            external_id = usage_data.get("external_id", "")
+
+            logger.info("interaction=%s cleanup=stale age_limit=%ds", interaction_id, max_age_seconds)
+
+            if external_id:
+                await self.finalize_interaction(external_id, interaction_id)
+            else:
+                self._interaction_usage.pop(interaction_id, None)
+                self._authorized_interactions.pop(interaction_id, None)
+
+    async def close(self) -> None:
+        """Close the HTTP client."""
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+            self._client = None
+
+
+# Instance for LiteLLM to load via config
+# Reference in litellm_config.yaml as: "billing_callback.billing_callback_instance"
+billing_callback_instance = CIRISBillingCallback()

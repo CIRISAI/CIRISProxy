@@ -1,0 +1,73 @@
+services:
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: ciris-proxy
+    restart: always
+    # No ports exposed - nginx handles external traffic
+    volumes:
+      - ./litellm_config.yaml:/app/config.yaml:ro
+      - ./hooks/billing_callback.py:/app/billing_callback.py:ro
+      - ./hooks/custom_auth.py:/app/custom_auth.py:ro
+    environment:
+      # LLM Provider Keys (server-side only)
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - TOGETHER_API_KEY=${TOGETHER_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+
+      # CIRISBilling Integration
+      - BILLING_API_URL=${BILLING_API_URL:-https://billing.ciris.ai}
+      - BILLING_API_KEY=${BILLING_API_KEY}
+
+      # LiteLLM Settings
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+      - LITELLM_LOG_LEVEL=${LITELLM_LOG_LEVEL:-INFO}
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+    networks:
+      - ciris-network
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+
+  nginx:
+    image: nginx:alpine
+    container_name: ciris-nginx
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certbot/www:/var/www/certbot:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+    networks:
+      - ciris-network
+    depends_on:
+      litellm:
+        condition: service_healthy
+
+  certbot:
+    image: certbot/certbot
+    container_name: ciris-certbot
+    volumes:
+      - ./certbot/www:/var/www/certbot
+      - ./certbot/conf:/etc/letsencrypt
+    # Run once to get cert, then use cron/timer for renewal
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+
+networks:
+  ciris-network:
+    driver: bridge

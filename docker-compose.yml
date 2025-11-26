@@ -1,0 +1,41 @@
+version: "3.9"
+
+services:
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: ciris-proxy
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./litellm_config.yaml:/app/config.yaml:ro
+      # Mount the callback file directly in /app where LiteLLM can import it
+      - ./hooks/billing_callback.py:/app/billing_callback.py:ro
+      # Mount the custom auth handler
+      - ./hooks/custom_auth.py:/app/custom_auth.py:ro
+    environment:
+      # LLM Provider Keys (server-side only)
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - TOGETHER_API_KEY=${TOGETHER_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+
+      # CIRISBilling Integration
+      - BILLING_API_URL=${BILLING_API_URL:-https://billing.ciris.ai}
+      - BILLING_API_KEY=${BILLING_API_KEY}
+
+      # LiteLLM Settings
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+      - LITELLM_LOG_LEVEL=${LITELLM_LOG_LEVEL:-INFO}
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--detailed_debug"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - ciris-network
+
+networks:
+  ciris-network:
+    driver: bridge

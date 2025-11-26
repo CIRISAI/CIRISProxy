@@ -1,0 +1,109 @@
+# CIRISProxy LiteLLM Configuration
+# Model routing for credit-gated LLM access
+
+model_list:
+  # Llama 4 Maverick - Primary model for CIRIS Agent
+  - model_name: "llama-4-maverick"
+    litellm_params:
+      model: "together_ai/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
+      api_key: "os.environ/TOGETHER_API_KEY"
+
+  - model_name: "groq/llama-4-maverick"
+    litellm_params:
+      model: "groq/meta-llama/llama-4-maverick-17b-128e-instruct"
+      api_key: "os.environ/GROQ_API_KEY"
+
+  # Groq Models (fast, cost-effective)
+  - model_name: "groq/llama-3.3-70b"
+    litellm_params:
+      model: "groq/llama-3.3-70b-versatile"
+      api_key: "os.environ/GROQ_API_KEY"
+
+  - model_name: "groq/llama-3.1-8b"
+    litellm_params:
+      model: "groq/llama-3.1-8b-instant"
+      api_key: "os.environ/GROQ_API_KEY"
+
+  # Together AI Models
+  - model_name: "together/llama-3.1-70b"
+    litellm_params:
+      model: "together_ai/meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo"
+      api_key: "os.environ/TOGETHER_API_KEY"
+
+  - model_name: "together/llama-3.1-8b"
+    litellm_params:
+      model: "together_ai/meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo"
+      api_key: "os.environ/TOGETHER_API_KEY"
+
+  - model_name: "together/qwen-2.5-72b"
+    litellm_params:
+      model: "together_ai/Qwen/Qwen2.5-72B-Instruct-Turbo"
+      api_key: "os.environ/TOGETHER_API_KEY"
+
+  # OpenAI (optional fallback)
+  - model_name: "openai/gpt-4o-mini"
+    litellm_params:
+      model: "gpt-4o-mini"
+      api_key: "os.environ/OPENAI_API_KEY"
+
+  - model_name: "openai/gpt-4o"
+    litellm_params:
+      model: "gpt-4o"
+      api_key: "os.environ/OPENAI_API_KEY"
+
+  # Aliases for simpler client usage
+  # Default model for CIRIS Agent - Llama 4 Maverick
+  - model_name: "default"
+    litellm_params:
+      model: "together_ai/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
+      api_key: "os.environ/TOGETHER_API_KEY"
+
+  - model_name: "fast"
+    litellm_params:
+      model: "groq/llama-3.1-8b-instant"
+      api_key: "os.environ/GROQ_API_KEY"
+
+litellm_settings:
+  # Custom callback for CIRISBilling integration
+  # Format: "filename.instance_name" where the file is in the working directory
+  callbacks: ["billing_callback.billing_callback_instance"]
+
+  # Drop unsupported parameters instead of erroring
+  drop_params: true
+
+  # Enable cost tracking (stored in response._hidden_params.response_cost)
+  success_callback: []
+  failure_callback: []
+
+  # Request timeout (seconds)
+  request_timeout: 120
+
+  # Set verbose for debugging (disable in production)
+  set_verbose: false
+
+router_settings:
+  # Routing strategy for model groups with multiple deployments
+  routing_strategy: "simple-shuffle"
+
+  # Retry settings
+  num_retries: 2
+  retry_after: 1
+
+  # Fallback chain
+  fallbacks:
+    - "llama-4-maverick": ["groq/llama-4-maverick", "together/llama-3.1-70b"]
+    - "groq/llama-3.3-70b": ["together/llama-3.1-70b", "openai/gpt-4o-mini"]
+
+general_settings:
+  # Master key for admin operations (not for client auth)
+  master_key: "os.environ/LITELLM_MASTER_KEY"
+
+  # Custom auth function - bypasses database and lets our callback handle auth
+  custom_auth: "custom_auth.user_api_key_auth"
+
+  # Disable the built-in database (we use CIRISBilling)
+  database_url: null
+
+  # Allow all origins for mobile clients
+  # In production, restrict to specific origins if needed
+  allowed_ips: null

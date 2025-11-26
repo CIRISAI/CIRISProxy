@@ -1,0 +1,99 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run tests
+        run: pytest tests/ -v --tb=short
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Sync files to server
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          # Create target directory if needed
+          ssh -i ~/.ssh/deploy_key ${USER}@${HOST} "mkdir -p /opt/cirisproxy"
+
+          # Sync files (exclude .git, .env, __pycache__, etc)
+          rsync -avz --delete \
+            --exclude '.git' \
+            --exclude '.env' \
+            --exclude '__pycache__' \
+            --exclude '*.pyc' \
+            --exclude '.venv' \
+            --exclude 'venv' \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            ./ ${USER}@${HOST}:/opt/cirisproxy/
+
+      - name: Restart services
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          ssh -i ~/.ssh/deploy_key ${USER}@${HOST} << 'ENDSSH'
+            set -e
+            cd /opt/cirisproxy
+            chmod +x deploy.sh
+
+            # Check if .env exists, if not show warning
+            if [ ! -f .env ]; then
+              echo "WARNING: .env not found - services may not start correctly"
+              echo "Run: cp .env.production .env && nano .env"
+              exit 0
+            fi
+
+            # Restart services
+            docker compose -f docker-compose.prod.yml pull
+            docker compose -f docker-compose.prod.yml --env-file .env up -d
+
+            # Health check (with retry)
+            for i in 1 2 3 4 5; do
+              sleep 5
+              if curl -sf http://localhost:4000/health; then
+                echo "Deployment successful!"
+                exit 0
+              fi
+              echo "Health check attempt $i failed, retrying..."
+            done
+
+            echo "Health check failed after 5 attempts"
+            docker compose -f docker-compose.prod.yml logs --tail=50
+            exit 1
+          ENDSSH
+
+      - name: Cleanup
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
