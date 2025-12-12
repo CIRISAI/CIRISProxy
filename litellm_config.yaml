@@ -3,7 +3,14 @@
 
 model_list:
   # Llama 4 Maverick - Primary model for CIRIS Agent
+  # Best for structured outputs / tool calling
+  # Pricing: Together ~$0.50/$0.80, Groq $0.50/$0.77, OpenRouter $0.11/$0.34 per 1M tokens
   - model_name: "llama-4-maverick"
+    litellm_params:
+      model: "together_ai/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
+      api_key: "os.environ/TOGETHER_API_KEY"
+
+  - model_name: "together/llama-4-maverick"
     litellm_params:
       model: "together_ai/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
       api_key: "os.environ/TOGETHER_API_KEY"
@@ -12,6 +19,38 @@ model_list:
     litellm_params:
       model: "groq/meta-llama/llama-4-maverick-17b-128e-instruct"
       api_key: "os.environ/GROQ_API_KEY"
+
+  - model_name: "openrouter/llama-4-maverick"
+    litellm_params:
+      model: "openrouter/meta-llama/llama-4-maverick"
+      api_key: "os.environ/OPENROUTER_API_KEY"
+
+  # GPT-OSS-20B - OpenAI's open-weight model (Apache 2.0)
+  # NOTE: Weak at structured outputs / tool calling - kept for reference
+  # Cheapest option: Together $0.05/$0.20 per 1M tokens
+  - model_name: "gpt-oss-20b"
+    litellm_params:
+      model: "together_ai/openai/gpt-oss-20b"
+      api_key: "os.environ/TOGETHER_API_KEY"
+      max_tokens: 131072
+
+  - model_name: "together/gpt-oss-20b"
+    litellm_params:
+      model: "together_ai/openai/gpt-oss-20b"
+      api_key: "os.environ/TOGETHER_API_KEY"
+      max_tokens: 131072
+
+  - model_name: "groq/gpt-oss-20b"
+    litellm_params:
+      model: "groq/openai/gpt-oss-20b"
+      api_key: "os.environ/GROQ_API_KEY"
+      max_tokens: 131072
+
+  - model_name: "openrouter/gpt-oss-20b"
+    litellm_params:
+      model: "openrouter/openai/gpt-oss-20b"
+      api_key: "os.environ/OPENROUTER_API_KEY"
+      max_tokens: 131072
 
   # Groq Models (fast, cost-effective)
   - model_name: "groq/llama-3.3-70b"
@@ -52,28 +91,28 @@ model_list:
       api_key: "os.environ/OPENAI_API_KEY"
 
   # Aliases for simpler client usage
-  # Default model for CIRIS Agent - Groq Llama 3.3 70B (fast and reliable)
+  # Default model for CIRIS Agent - Llama 4 Maverick via OpenRouter (cheapest)
+  # Pricing: OpenRouter $0.11/$0.34 per 1M tokens
   - model_name: "default"
     litellm_params:
-      model: "groq/llama-3.3-70b-versatile"
-      api_key: "os.environ/GROQ_API_KEY"
+      model: "openrouter/meta-llama/llama-4-maverick"
+      api_key: "os.environ/OPENROUTER_API_KEY"
 
   - model_name: "fast"
     litellm_params:
-      model: "groq/llama-3.1-8b-instant"
+      model: "groq/meta-llama/llama-4-maverick-17b-128e-instruct"
       api_key: "os.environ/GROQ_API_KEY"
 
 litellm_settings:
   # Custom callback for CIRISBilling integration
   # Format: "filename.instance_name" where the file is in the working directory
+  # callbacks runs pre_call_hook, success_callback for success, failure_callback for failures
   callbacks: ["billing_callback.billing_callback_instance"]
+  success_callback: ["billing_callback.billing_callback_instance"]
+  failure_callback: ["billing_callback.billing_callback_instance"]
 
   # Drop unsupported parameters instead of erroring
   drop_params: true
-
-  # Enable cost tracking (stored in response._hidden_params.response_cost)
-  success_callback: []
-  failure_callback: []
 
   # Request timeout (seconds)
   request_timeout: 120
@@ -89,10 +128,14 @@ router_settings:
   num_retries: 2
   retry_after: 1
 
-  # Fallback chain
+  # Fallback chain - Llama 4 Maverick across 3 providers
+  # Pricing: OpenRouter $0.11/$0.34, Groq $0.50/$0.77, Together ~$0.50/$0.80 per 1M tokens
   fallbacks:
-    - "default": ["together/llama-3.1-70b", "openai/gpt-4o-mini"]
-    - "llama-4-maverick": ["groq/llama-4-maverick", "together/llama-3.1-70b"]
+    - "default": ["groq/llama-4-maverick", "together/llama-4-maverick", "groq/llama-3.3-70b"]
+    - "llama-4-maverick": ["groq/llama-4-maverick", "together/llama-4-maverick"]
+    - "together/llama-4-maverick": ["groq/llama-4-maverick", "openrouter/llama-4-maverick"]
+    - "groq/llama-4-maverick": ["openrouter/llama-4-maverick", "together/llama-4-maverick"]
+    - "openrouter/llama-4-maverick": ["groq/llama-4-maverick", "together/llama-4-maverick"]
     - "groq/llama-3.3-70b": ["together/llama-3.1-70b", "openai/gpt-4o-mini"]
 
 general_settings:
