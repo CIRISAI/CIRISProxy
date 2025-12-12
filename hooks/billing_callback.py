@@ -35,7 +35,15 @@ import httpx
 from litellm.integrations.custom_logger import CustomLogger
 
 # Add sdk to path for logshipper import
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+# In production: /app/billing_callback.py needs /app in path to find /app/sdk/
+# In local: hooks/billing_callback.py needs parent dir to find sdk/
+_this_dir = os.path.dirname(os.path.abspath(__file__))
+_parent_dir = os.path.dirname(_this_dir)
+# If file is directly in /app, add /app. If in hooks/, add parent.
+if os.path.basename(_this_dir) == "hooks":
+    sys.path.insert(0, _parent_dir)
+else:
+    sys.path.insert(0, _this_dir)
 from sdk.logshipper import LogShipper
 
 logger = logging.getLogger(__name__)
