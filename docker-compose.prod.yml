@@ -15,6 +15,7 @@ services:
       - GROQ_API_KEY=${GROQ_API_KEY}
       - TOGETHER_API_KEY=${TOGETHER_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
 
       # CIRISBilling Integration
       - BILLING_API_URL=${BILLING_API_URL:-https://billing.ciris.ai}
