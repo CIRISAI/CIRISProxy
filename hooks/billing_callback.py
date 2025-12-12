@@ -46,7 +46,34 @@ else:
     sys.path.insert(0, _this_dir)
 from sdk.logshipper import LogShipper
 
+# Configure logging to both stdout and file
+LOG_FILE = os.environ.get("CIRIS_LOG_FILE", "/app/logs/cirisproxy.log")
+LOG_LEVEL = os.environ.get("CIRIS_LOG_LEVEL", "INFO")
+
+# Ensure log directory exists
+os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+
+# Set up root logger for our module
 logger = logging.getLogger(__name__)
+logger.setLevel(getattr(logging, LOG_LEVEL))
+
+# File handler - append mode, with rotation-friendly format
+_file_handler = logging.FileHandler(LOG_FILE, mode='a')
+_file_handler.setLevel(logging.DEBUG)
+_file_handler.setFormatter(logging.Formatter(
+    '%(asctime)s %(levelname)s [%(name)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+))
+logger.addHandler(_file_handler)
+
+# Also log to stdout
+_stream_handler = logging.StreamHandler(sys.stdout)
+_stream_handler.setLevel(getattr(logging, LOG_LEVEL))
+_stream_handler.setFormatter(logging.Formatter(
+    '%(asctime)s %(levelname)s [%(name)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+))
+logger.addHandler(_stream_handler)
 
 # Initialize CIRISLens log shipper (if token configured)
 _lens_shipper: LogShipper | None = None
