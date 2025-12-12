@@ -4,7 +4,7 @@
 
 **CIRISProxy** is a LiteLLM-based proxy service that provides secure, credit-gated LLM access for CIRIS Agent mobile clients.
 
-- **Domain**: llm.ciris.ai (planned)
+- **Domain**: llm.ciris.ai
 - **Tech Stack**: LiteLLM, FastAPI, Docker
 - **Purpose**: Secure API key isolation + credit-based access control
 
@@ -473,13 +473,62 @@ This is already partially implemented in `BillingApiClient.kt`:
 - `getGoogleUserId()` / `setGoogleUserId()` exist
 - Just need to wire up actual Google Sign-In flow
 
+## CIRISLens Observability Integration
+
+CIRISProxy ships logs to CIRISLens for centralized observability across all CIRIS services.
+
+### Setup
+
+1. Generate a service token at https://agents.ciris.ai/lens/admin/
+2. Set the environment variable: `CIRISLENS_TOKEN=svc_xxx`
+3. Optionally configure endpoint: `CIRISLENS_ENDPOINT=https://agents.ciris.ai/lens/api/v1/logs/ingest`
+
+### Events Logged
+
+| Event | Level | Description |
+|-------|-------|-------------|
+| `auth_granted` | INFO | User authorized with available credits |
+| `auth_denied` | WARNING | User denied due to insufficient credits |
+| `charge_created` | INFO | Credit deducted for new interaction |
+| `charge_failed` | WARNING | Charge request failed (non-network) |
+| `charge_error` | ERROR | Charge request network error |
+| `billing_error` | ERROR | Billing service unreachable |
+| `llm_error` | ERROR | LLM call failed |
+
+### Log Format
+
+All logs include:
+- `interaction_id`: Links all calls in a user interaction
+- `user_hash`: SHA-256 hash of user ID (first 8 chars only)
+- `event`: Structured event type for filtering
+
+### LogShipper SDK
+
+The `sdk/logshipper.py` module provides batched log shipping with:
+- Background thread for async flushing
+- Retry with exponential backoff
+- Thread-safe buffer management
+- Graceful shutdown
+
+```python
+from sdk.logshipper import LogShipper
+
+shipper = LogShipper(
+    service_name="cirisproxy",
+    token=os.environ["CIRISLENS_TOKEN"],
+)
+
+shipper.info("Request processed", event="request_completed", model="groq/llama-3.1-70b")
+```
+
 ## Related Repositories
 
 | Repository | Purpose | URL |
 |------------|---------|-----|
 | CIRISAgent | Core AI platform + Android app | agents.ciris.ai |
 | CIRISBilling | Credit gating + Google Play | billing.ciris.ai |
-| CIRISProxy | LLM proxy (this repo) | llm.ciris.ai (planned) |
+| CIRISProxy | LLM proxy (this repo) | llm.ciris.ai |
+| CIRISLens | Observability + dashboards | agents.ciris.ai/lens/ |
 
 ## Project Structure
 
@@ -490,7 +539,10 @@ CIRISProxy/
 ├── litellm_config.yaml     # Model routing (Groq, Together, etc.)
 ├── hooks/
 │   ├── __init__.py
-│   └── billing_callback.py # CIRISBilling integration
+│   └── billing_callback.py # CIRISBilling + CIRISLens integration
+├── sdk/
+│   ├── __init__.py
+│   └── logshipper.py       # CIRISLens log shipping SDK
 ├── Dockerfile              # Custom build if needed
 ├── .env.example            # Environment template
 └── .github/
