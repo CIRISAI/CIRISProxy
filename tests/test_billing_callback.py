@@ -70,14 +70,15 @@ class TestPreCallHook:
         self, callback, sample_user_api_key_dict, sample_request_data, billing_url
     ):
         """Test that first call for interaction checks auth."""
-        # Mock the auth endpoint
-        auth_route = respx.post(f"{billing_url}/v1/billing/litellm/auth").mock(
+        # Mock the credits/check endpoint (new API)
+        auth_route = respx.post(f"{billing_url}/v1/billing/credits/check").mock(
             return_value=httpx.Response(
                 200,
                 json={
-                    "authorized": True,
+                    "has_credit": True,
+                    "free_uses_remaining": 0,
                     "credits_remaining": 10,
-                    "interaction_id": "int-test-456",
+                    "daily_free_uses_remaining": 0,
                 },
             )
         )
@@ -111,8 +112,8 @@ class TestPreCallHook:
         callback._authorized_interactions["int-test-456"] = True
 
         # Mock the auth endpoint (should not be called)
-        auth_route = respx.post(f"{billing_url}/v1/billing/litellm/auth").mock(
-            return_value=httpx.Response(200, json={"authorized": True})
+        auth_route = respx.post(f"{billing_url}/v1/billing/credits/check").mock(
+            return_value=httpx.Response(200, json={"has_credit": True})
         )
 
         await callback.async_pre_call_hook(
@@ -132,12 +133,14 @@ class TestPreCallHook:
     ):
         """Test that unauthorized users are rejected."""
         # Mock the auth endpoint to deny
-        respx.post(f"{billing_url}/v1/billing/litellm/auth").mock(
+        respx.post(f"{billing_url}/v1/billing/credits/check").mock(
             return_value=httpx.Response(
                 200,
                 json={
-                    "authorized": False,
-                    "reason": "No credits remaining",
+                    "has_credit": False,
+                    "free_uses_remaining": 0,
+                    "credits_remaining": 0,
+                    "daily_free_uses_remaining": 0,
                 },
             )
         )
@@ -200,7 +203,7 @@ class TestPreCallHook:
     ):
         """Test handling of billing service errors."""
         # Mock the auth endpoint to return 500
-        respx.post(f"{billing_url}/v1/billing/litellm/auth").mock(
+        respx.post(f"{billing_url}/v1/billing/credits/check").mock(
             return_value=httpx.Response(500, text="Internal Server Error")
         )
 
@@ -221,7 +224,7 @@ class TestPreCallHook:
     ):
         """Test handling of network errors."""
         # Mock network failure
-        respx.post(f"{billing_url}/v1/billing/litellm/auth").mock(
+        respx.post(f"{billing_url}/v1/billing/credits/check").mock(
             side_effect=httpx.ConnectError("Connection refused")
         )
 
@@ -250,17 +253,20 @@ class TestLogSuccessEvent:
         self, callback, sample_response_obj, mock_litellm_params, billing_url
     ):
         """Test that success event calls charge endpoint."""
-        # Mock the charge endpoint
-        charge_route = respx.post(f"{billing_url}/v1/billing/litellm/charge").mock(
+        # Mock the charge endpoint (new API)
+        charge_route = respx.post(f"{billing_url}/v1/billing/charges").mock(
             return_value=httpx.Response(
-                200,
+                201,
                 json={
-                    "charged": True,
-                    "credits_deducted": 1,
-                    "credits_remaining": 9,
-                    "charge_id": "charge-123",
+                    "id": "charge-123",
+                    "amount_minor": 1,
+                    "balance_after": 9,
                 },
             )
+        )
+        # Also mock the usage streaming endpoint
+        respx.post(f"{billing_url}/v1/billing/litellm/usage").mock(
+            return_value=httpx.Response(200, json={"logged": True})
         )
 
         kwargs = {"litellm_params": mock_litellm_params, "model": "groq/llama-3.1-70b"}
@@ -290,8 +296,12 @@ class TestLogSuccessEvent:
     ):
         """Test that success event aggregates usage data."""
         # Mock the charge endpoint
-        respx.post(f"{billing_url}/v1/billing/litellm/charge").mock(
-            return_value=httpx.Response(200, json={"charged": True})
+        respx.post(f"{billing_url}/v1/billing/charges").mock(
+            return_value=httpx.Response(201, json={"id": "charge-123"})
+        )
+        # Mock the usage streaming endpoint
+        respx.post(f"{billing_url}/v1/billing/litellm/usage").mock(
+            return_value=httpx.Response(200, json={"logged": True})
         )
 
         # Initialize interaction tracking
@@ -324,8 +334,12 @@ class TestLogSuccessEvent:
     ):
         """Test that multiple calls aggregate correctly."""
         # Mock the charge endpoint
-        respx.post(f"{billing_url}/v1/billing/litellm/charge").mock(
-            return_value=httpx.Response(200, json={"charged": True})
+        respx.post(f"{billing_url}/v1/billing/charges").mock(
+            return_value=httpx.Response(201, json={"id": "charge-123"})
+        )
+        # Mock the usage streaming endpoint
+        respx.post(f"{billing_url}/v1/billing/litellm/usage").mock(
+            return_value=httpx.Response(200, json={"logged": True})
         )
 
         callback._interaction_usage["int-test-456"]["external_id"] = "test-user-123"
@@ -516,6 +530,167 @@ class TestCleanupStaleInteractions:
 
         # Fresh should remain
         assert "fresh-int-456" in callback._interaction_usage
+
+
+class TestInteractionLimits:
+    """Tests for interaction limit enforcement (stale/excessive calls)."""
+
+    @pytest.fixture
+    def callback(self):
+        """Create a fresh callback instance."""
+        return CIRISBillingCallback()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_stale_interaction_triggers_new_charge(
+        self, callback, sample_user_api_key_dict, sample_request_data, billing_url
+    ):
+        """Test that interaction reused after 5 minutes gets a continuation ID."""
+        from hooks.billing_callback import MAX_INTERACTION_AGE_SECONDS
+
+        # Set up an old interaction (6 minutes ago)
+        interaction_id = sample_request_data["metadata"]["interaction_id"]
+        callback._interaction_usage[interaction_id] = {
+            "external_id": "test-user-123",
+            "llm_calls": 10,
+            "prompt_tokens": 1000,
+            "completion_tokens": 500,
+            "models": set(),
+            "cost_cents": 1.0,
+            "duration_ms": 5000,
+            "errors": 0,
+            "fallbacks": 0,
+            "start_time": datetime.now(timezone.utc) - timedelta(seconds=MAX_INTERACTION_AGE_SECONDS + 60),
+        }
+        callback._authorized_interactions[interaction_id] = True
+
+        # Mock auth endpoint for the new continuation ID
+        auth_route = respx.post(f"{billing_url}/v1/billing/credits/check").mock(
+            return_value=httpx.Response(
+                200, json={"has_credit": True, "credits_remaining": 10, "free_uses_remaining": 0, "daily_free_uses_remaining": 0}
+            )
+        )
+
+        # Mock usage endpoint for finalization of stale interaction
+        usage_route = respx.post(f"{billing_url}/v1/billing/litellm/usage").mock(
+            return_value=httpx.Response(200, json={"logged": True})
+        )
+
+        await callback.async_pre_call_hook(
+            user_api_key_dict=sample_user_api_key_dict,
+            cache=None,
+            data=sample_request_data,
+            call_type="completion",
+        )
+
+        # Should have called auth (for new continuation ID)
+        assert auth_route.called
+
+        # Should have logged usage for the stale interaction
+        assert usage_route.called
+
+        # The stored interaction_id should be a continuation ID
+        stored_id = sample_request_data["metadata"]["_ciris_interaction_id"]
+        assert "__cont_stale_" in stored_id
+        assert stored_id.startswith(interaction_id)
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_excessive_calls_triggers_new_charge(
+        self, callback, sample_user_api_key_dict, sample_request_data, billing_url
+    ):
+        """Test that exceeding 80 LLM calls triggers a continuation charge."""
+        from hooks.billing_callback import MAX_LLM_CALLS_PER_INTERACTION
+
+        # Set up an interaction with 80 calls already
+        interaction_id = sample_request_data["metadata"]["interaction_id"]
+        callback._interaction_usage[interaction_id] = {
+            "external_id": "test-user-123",
+            "llm_calls": MAX_LLM_CALLS_PER_INTERACTION,  # At the limit
+            "prompt_tokens": 100000,
+            "completion_tokens": 50000,
+            "models": set(),
+            "cost_cents": 10.0,
+            "duration_ms": 60000,
+            "errors": 0,
+            "fallbacks": 0,
+            "start_time": datetime.now(timezone.utc) - timedelta(seconds=60),  # Recent
+        }
+        callback._authorized_interactions[interaction_id] = True
+
+        # Mock auth endpoint for the new continuation ID
+        auth_route = respx.post(f"{billing_url}/v1/billing/credits/check").mock(
+            return_value=httpx.Response(
+                200, json={"has_credit": True, "credits_remaining": 9, "free_uses_remaining": 0, "daily_free_uses_remaining": 0}
+            )
+        )
+
+        # Mock usage endpoint for finalization of excessive-calls interaction
+        usage_route = respx.post(f"{billing_url}/v1/billing/litellm/usage").mock(
+            return_value=httpx.Response(200, json={"logged": True})
+        )
+
+        await callback.async_pre_call_hook(
+            user_api_key_dict=sample_user_api_key_dict,
+            cache=None,
+            data=sample_request_data,
+            call_type="completion",
+        )
+
+        # Should have called auth (for new continuation ID)
+        assert auth_route.called
+
+        # Should have logged usage for the exceeded interaction
+        assert usage_route.called
+
+        # The stored interaction_id should be a continuation ID
+        stored_id = sample_request_data["metadata"]["_ciris_interaction_id"]
+        assert "__cont_calls" in stored_id
+        assert stored_id.startswith(interaction_id)
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_normal_interaction_not_affected(
+        self, callback, sample_user_api_key_dict, sample_request_data, billing_url
+    ):
+        """Test that normal interactions within limits are not affected."""
+        # Set up a normal interaction (2 minutes old, 10 calls)
+        interaction_id = sample_request_data["metadata"]["interaction_id"]
+        callback._interaction_usage[interaction_id] = {
+            "external_id": "test-user-123",
+            "llm_calls": 10,
+            "prompt_tokens": 1000,
+            "completion_tokens": 500,
+            "models": set(),
+            "cost_cents": 1.0,
+            "duration_ms": 5000,
+            "errors": 0,
+            "fallbacks": 0,
+            "start_time": datetime.now(timezone.utc) - timedelta(seconds=120),  # 2 minutes
+        }
+        callback._authorized_interactions[interaction_id] = True
+
+        # Auth should NOT be called (cached)
+        auth_route = respx.post(f"{billing_url}/v1/billing/credits/check").mock(
+            return_value=httpx.Response(
+                200, json={"has_credit": True, "credits_remaining": 10, "free_uses_remaining": 0, "daily_free_uses_remaining": 0}
+            )
+        )
+
+        await callback.async_pre_call_hook(
+            user_api_key_dict=sample_user_api_key_dict,
+            cache=None,
+            data=sample_request_data,
+            call_type="completion",
+        )
+
+        # Should NOT have called auth (using cache)
+        assert not auth_route.called
+
+        # The interaction_id should be unchanged
+        stored_id = sample_request_data["metadata"]["_ciris_interaction_id"]
+        assert stored_id == interaction_id
+        assert "__cont_" not in stored_id
 
 
 class TestClientManagement:
