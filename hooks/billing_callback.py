@@ -70,6 +70,61 @@ else:
 MAX_INTERACTION_AGE_SECONDS = 300  # 5 minutes - interaction reused after this is a new task
 MAX_LLM_CALLS_PER_INTERACTION = 80  # Exceeding this triggers a new charge
 
+# Vision/multimodal routing configuration
+# Groq doesn't support system messages + images, so route multimodal to these providers
+VISION_COMPATIBLE_PROVIDERS = ["together_ai", "openrouter"]
+VISION_FALLBACK_MODEL = "together_ai/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
+
+
+def _is_multimodal_request(data: dict) -> bool:
+    """
+    Detect if request contains multimodal (image) content.
+
+    Returns True if any message has content as an array with image_url type.
+    """
+    messages = data.get("messages", [])
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    return True
+    return False
+
+
+def _get_vision_compatible_model(current_model: str) -> str | None:
+    """
+    If current model routes to a non-vision-compatible provider (Groq),
+    return a vision-compatible alternative. Returns None if already compatible.
+    """
+    if not current_model:
+        return VISION_FALLBACK_MODEL
+
+    model_lower = current_model.lower()
+
+    # Check if already using a vision-compatible provider
+    for provider in VISION_COMPATIBLE_PROVIDERS:
+        if provider.lower() in model_lower:
+            return None  # Already compatible
+
+    # Groq models need to be rerouted for vision
+    if "groq" in model_lower:
+        # Map to Together AI equivalent
+        if "maverick" in model_lower or "llama-4" in model_lower:
+            return "together_ai/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
+        elif "llama-3.3" in model_lower or "llama-3.1-70b" in model_lower:
+            return "together_ai/meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo"
+        elif "llama-3.1-8b" in model_lower:
+            return "together_ai/meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo"
+        else:
+            return VISION_FALLBACK_MODEL
+
+    # Default/fast models - check if they route to Groq
+    if current_model in ("default", "fast"):
+        return VISION_FALLBACK_MODEL
+
+    return None  # Assume compatible
+
 # Global aggregate usage counters (persist across all interactions)
 _global_usage = {
     "total_llm_calls": 0,
@@ -358,7 +413,29 @@ class CIRISBillingCallback(CustomLogger):
 
         Called before every LLM request. We cache the auth result per
         interaction_id to avoid hammering the billing API.
+
+        Also handles multimodal routing - Groq doesn't support system messages
+        with images, so we route vision requests to Together AI instead.
         """
+        # === MULTIMODAL ROUTING ===
+        # Detect vision requests and route to compatible providers
+        if _is_multimodal_request(data):
+            current_model = data.get("model", "")
+            vision_model = _get_vision_compatible_model(current_model)
+            if vision_model:
+                print(
+                    f"[CIRIS VISION] Multimodal detected, rerouting from {current_model} to {vision_model}",
+                    flush=True
+                )
+                data["model"] = vision_model
+                _ship_log(
+                    "INFO",
+                    f"Vision request rerouted to {vision_model}",
+                    event="vision_reroute",
+                    original_model=current_model,
+                    vision_model=vision_model,
+                )
+
         # Extract user identity from the Authorization header
         # Handle both dict and UserAPIKeyAuth Pydantic model
         if hasattr(user_api_key_dict, "api_key"):
