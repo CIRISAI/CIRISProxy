@@ -775,13 +775,17 @@ class CIRISBillingCallback(CustomLogger):
             logger.debug("interaction=%s event=error", interaction_id)
 
             external_id = metadata.get("_ciris_external_id", "")
+            # Extract exception details for debugging
+            exception = kwargs.get("exception", None)
+            error_msg = str(exception)[:200] if exception else "Unknown error"
             _ship_log(
                 "ERROR",
-                "LLM call failed",
+                f"LLM call failed: {error_msg}",
                 event="llm_error",
                 interaction_id=interaction_id,
                 user_hash=_hash_id(external_id) if external_id else None,
                 model=kwargs.get("model", "unknown"),
+                error=error_msg,
             )
 
     async def finalize_interaction(
