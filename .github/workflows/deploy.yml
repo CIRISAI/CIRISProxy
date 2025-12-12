@@ -1,9 +1,13 @@
-name: Deploy to Production
+name: Build and Deploy
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: cirisai/cirisproxy
 
 jobs:
   test:
@@ -24,8 +28,45 @@ jobs:
       - name: Run tests
         run: pytest tests/ -v --tb=short
 
-  deploy:
+  build:
     needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tags }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  deploy:
+    needs: build
     runs-on: ubuntu-latest
     environment: production
 
@@ -39,50 +80,52 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
 
-      - name: Sync files to server
+      - name: Sync config files to server
         env:
           HOST: ${{ secrets.DEPLOY_HOST }}
           USER: ${{ secrets.DEPLOY_USER }}
         run: |
-          # Create target directory if needed
           ssh -i ~/.ssh/deploy_key ${USER}@${HOST} "mkdir -p /opt/cirisproxy"
 
-          # Sync files (exclude .git, .env, __pycache__, etc)
-          rsync -avz --delete \
-            --exclude '.git' \
-            --exclude '.env' \
-            --exclude '__pycache__' \
-            --exclude '*.pyc' \
-            --exclude '.venv' \
-            --exclude 'venv' \
+          # Sync only config files (not Dockerfile since image is pre-built)
+          rsync -avz \
+            --include='docker-compose.prod.yml' \
+            --include='litellm_config.yaml' \
+            --include='hooks/***' \
+            --include='sdk/***' \
+            --include='nginx/***' \
+            --exclude='*' \
             -e "ssh -i ~/.ssh/deploy_key" \
             ./ ${USER}@${HOST}:/opt/cirisproxy/
 
-      - name: Restart services
+      - name: Deploy to server
         env:
           HOST: ${{ secrets.DEPLOY_HOST }}
           USER: ${{ secrets.DEPLOY_USER }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Pass token securely to remote server
+          ssh -i ~/.ssh/deploy_key ${USER}@${HOST} "echo '${GHCR_TOKEN}' | docker login ghcr.io -u ${{ github.actor }} --password-stdin"
+
           ssh -i ~/.ssh/deploy_key ${USER}@${HOST} << 'ENDSSH'
             set -e
             cd /opt/cirisproxy
-            chmod +x deploy.sh
 
-            # Check if .env exists, if not show warning
+            # Check if .env exists
             if [ ! -f .env ]; then
-              echo "WARNING: .env not found - services may not start correctly"
+              echo "ERROR: .env not found"
               echo "Run: cp .env.production .env && nano .env"
-              exit 0
+              exit 1
             fi
 
-            # Restart services
+            # Pull and deploy
             docker compose -f docker-compose.prod.yml pull
             docker compose -f docker-compose.prod.yml --env-file .env up -d
 
             # Health check (with retry)
             for i in 1 2 3 4 5; do
               sleep 5
-              if curl -sf http://localhost:4000/health; then
+              if curl -sf http://localhost:4000/health/liveliness; then
                 echo "Deployment successful!"
                 exit 0
               fi

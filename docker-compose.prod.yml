@@ -1,9 +1,6 @@
 services:
   litellm:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: cirisproxy:latest
+    image: ghcr.io/cirisai/cirisproxy:latest
     container_name: ciris-proxy
     restart: always
     # No ports exposed - nginx handles external traffic
