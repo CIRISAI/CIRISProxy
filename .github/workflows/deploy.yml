@@ -122,10 +122,10 @@ jobs:
             docker compose -f docker-compose.prod.yml pull
             docker compose -f docker-compose.prod.yml --env-file .env up -d
 
-            # Health check (with retry)
+            # Health check (with retry) - use docker exec since port isn't exposed to host
             for i in 1 2 3 4 5; do
               sleep 5
-              if curl -sf http://localhost:4000/health/liveliness; then
+              if docker exec ciris-proxy python -c "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')"; then
                 echo "Deployment successful!"
                 exit 0
               fi
