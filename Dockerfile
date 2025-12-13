@@ -22,5 +22,8 @@ COPY litellm_config.yaml /app/config.yaml
 # Set working directory
 WORKDIR /app
 
+# Ensure Python can find modules in /app
+ENV PYTHONPATH=/app
+
 # Default command
 CMD ["--config", "/app/config.yaml", "--port", "4000"]
