@@ -50,8 +50,13 @@ from sdk.logshipper import LogShipper
 LOG_FILE = os.environ.get("CIRIS_LOG_FILE", "/app/logs/cirisproxy.log")
 LOG_LEVEL = os.environ.get("CIRIS_LOG_LEVEL", "INFO")
 
-# Ensure log directory exists
-os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+# Ensure log directory exists (gracefully handle permission errors in CI/test)
+try:
+    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+except PermissionError:
+    # Fall back to temp directory if /app not writable (e.g., in CI)
+    import tempfile
+    LOG_FILE = os.path.join(tempfile.gettempdir(), "cirisproxy.log")
 
 # Set up root logger for our module
 logger = logging.getLogger(__name__)
