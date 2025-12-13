@@ -29,5 +29,5 @@ WORKDIR /app
 # Ensure Python can find modules in /app
 ENV PYTHONPATH=/app
 
-# Default command
-CMD ["--config", "/app/config.yaml", "--port", "4000"]
+# Default command (--detailed_debug helps troubleshoot callback loading)
+CMD ["--config", "/app/config.yaml", "--port", "4000", "--detailed_debug"]
