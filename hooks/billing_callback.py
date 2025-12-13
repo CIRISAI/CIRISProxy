@@ -923,3 +923,42 @@ class CIRISBillingCallback(CustomLogger):
 # Instance for LiteLLM to load via config
 # Reference in litellm_config.yaml as: "billing_callback.billing_callback_instance"
 billing_callback_instance = CIRISBillingCallback()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CALLBACK STATUS - For health check verification
+# ═══════════════════════════════════════════════════════════════════════════════
+import json
+
+CALLBACK_STATUS_FILE = "/app/callback_status.json"
+
+def _write_callback_status():
+    """Write callback status file for health check verification."""
+    status = {
+        "billing_callback_loaded": True,
+        "lens_shipper_loaded": _lens_shipper is not None,
+        "initialized_at": datetime.now(timezone.utc).isoformat(),
+        "billing_url": billing_callback_instance.billing_url,
+    }
+    try:
+        with open(CALLBACK_STATUS_FILE, "w") as f:
+            json.dump(status, f)
+        logger.info("Callback status written to %s", CALLBACK_STATUS_FILE)
+    except Exception as e:
+        logger.warning("Failed to write callback status: %s", e)
+
+def get_callback_status() -> dict:
+    """Get current callback status for health checks."""
+    return {
+        "billing_callback_loaded": True,
+        "lens_shipper_loaded": _lens_shipper is not None,
+        "requests_processed": _global_usage["total_llm_calls"],
+        "interactions_processed": _global_usage["total_interactions"],
+        "billing_url": billing_callback_instance.billing_url,
+        "uptime_seconds": (
+            (datetime.now(timezone.utc) - _global_usage["start_time"]).total_seconds()
+            if _global_usage["start_time"] else 0
+        ),
+    }
+
+# Write status file on module load (proves callback was imported)
+_write_callback_status()

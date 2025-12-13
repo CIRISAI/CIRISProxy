@@ -19,6 +19,10 @@ COPY hooks/custom_auth.py /app/custom_auth.py
 # Copy config
 COPY litellm_config.yaml /app/config.yaml
 
+# Copy health check script
+COPY scripts/healthcheck.py /app/healthcheck.py
+RUN chmod +x /app/healthcheck.py
+
 # Set working directory
 WORKDIR /app
 
