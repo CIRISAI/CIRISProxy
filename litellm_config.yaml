@@ -106,9 +106,12 @@ model_list:
 litellm_settings:
   # Custom callback for CIRISBilling integration
   # Format: "filename.instance_name" where the file is in the working directory
-  callbacks: billing_callback.billing_callback_instance
-  success_callback: billing_callback.billing_callback_instance
-  failure_callback: billing_callback.billing_callback_instance
+  callbacks:
+    - billing_callback.billing_callback_instance
+  success_callback:
+    - billing_callback.billing_callback_instance
+  failure_callback:
+    - billing_callback.billing_callback_instance
 
   # Drop unsupported parameters instead of erroring
   drop_params: true
