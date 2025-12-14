@@ -18,6 +18,9 @@ COPY hooks/custom_auth.py /app/custom_auth.py
 COPY hooks/search_handler.py /app/search_handler.py
 COPY hooks/status_handler.py /app/status_handler.py
 
+# Copy custom server wrapper
+COPY server.py /app/server.py
+
 # Copy config
 COPY litellm_config.yaml /app/config.yaml
 

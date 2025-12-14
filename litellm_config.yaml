@@ -155,19 +155,5 @@ general_settings:
   # In production, restrict to specific origins if needed
   allowed_ips: null
 
-  # Pass-through endpoints for non-LLM APIs
-  # Web search uses custom handler for billing integration
-  pass_through_endpoints:
-    # Brave Search API - Web search for CIRIS Agent
-    # Uses custom adapter that charges credits before calling Brave
-    # Usage: POST /v1/search with {"q": "search query", "count": 10}
-    - path: "/v1/search"
-      target: "search_handler.handle_search_request"
-      headers:
-        litellm_user_api_key: "authorization"
-
-    # Status endpoint - health checks for all providers
-    # Used by CIRISLens for aggregated status monitoring
-    # No auth required - public endpoint
-    - path: "/v1/status"
-      target: "status_handler.get_status"
+  # Custom endpoints (/v1/status, /v1/search) are added via server.py wrapper
+  # See server.py for implementation - these routes are added directly to FastAPI

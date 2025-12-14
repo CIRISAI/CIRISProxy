@@ -10,6 +10,7 @@ services:
       - ./hooks/custom_auth.py:/app/custom_auth.py:ro
       - ./hooks/search_handler.py:/app/search_handler.py:ro
       - ./hooks/status_handler.py:/app/status_handler.py:ro
+      - ./server.py:/app/server.py:ro
       - ./sdk:/app/sdk:ro
       - ./logs:/app/logs
     environment:
