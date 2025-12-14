@@ -91,8 +91,10 @@ jobs:
           rsync -avz \
             --include='docker-compose.prod.yml' \
             --include='litellm_config.yaml' \
+            --include='server.py' \
             --include='hooks/***' \
             --include='sdk/***' \
+            --include='scripts/***' \
             --include='nginx/***' \
             --exclude='*' \
             -e "ssh -i ~/.ssh/deploy_key" \
