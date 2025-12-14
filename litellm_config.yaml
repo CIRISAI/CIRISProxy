@@ -154,3 +154,14 @@ general_settings:
   # Allow all origins for mobile clients
   # In production, restrict to specific origins if needed
   allowed_ips: null
+
+  # Pass-through endpoints for non-LLM APIs
+  # Web search uses custom handler for billing integration
+  pass_through_endpoints:
+    # Brave Search API - Web search for CIRIS Agent
+    # Uses custom adapter that charges credits before calling Brave
+    # Usage: POST /v1/search with {"q": "search query", "count": 10}
+    - path: "/v1/search"
+      target: "search_handler.handle_search_request"
+      headers:
+        litellm_user_api_key: "authorization"

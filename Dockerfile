@@ -12,9 +12,10 @@ RUN mkdir -p /app/sdk /app/hooks /app/logs
 # Copy SDK
 COPY sdk/ /app/sdk/
 
-# Copy hooks (billing callback and custom auth)
+# Copy hooks (billing callback, custom auth, and search handler)
 COPY hooks/billing_callback.py /app/billing_callback.py
 COPY hooks/custom_auth.py /app/custom_auth.py
+COPY hooks/search_handler.py /app/search_handler.py
 
 # Copy config
 COPY litellm_config.yaml /app/config.yaml

@@ -8,6 +8,7 @@ services:
       - ./litellm_config.yaml:/app/config.yaml:ro
       - ./hooks/billing_callback.py:/app/billing_callback.py:ro
       - ./hooks/custom_auth.py:/app/custom_auth.py:ro
+      - ./hooks/search_handler.py:/app/search_handler.py:ro
       - ./sdk:/app/sdk:ro
       - ./logs:/app/logs
     environment:
@@ -16,6 +17,9 @@ services:
       - TOGETHER_API_KEY=${TOGETHER_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+
+      # Web Search (Brave API)
+      - BRAVE_API_KEY=${BRAVE_API_KEY:-}
 
       # CIRISBilling Integration
       - BILLING_API_URL=${BILLING_API_URL:-https://billing.ciris.ai}
