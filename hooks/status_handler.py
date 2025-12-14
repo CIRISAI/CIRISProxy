@@ -2,7 +2,7 @@
 Status Endpoint for CIRISProxy
 
 Exposes /v1/status with health checks for all providers:
-- LLM Providers: OpenRouter, Groq, Together AI, OpenAI
+- LLM Providers: OpenRouter, Groq, Together AI
 - Billing: CIRISBilling API
 - Search: Brave Search API
 
@@ -49,14 +49,6 @@ PROVIDERS = {
         "type": "llm",
         "check_url": "https://api.together.xyz/v1/models",
         "env_key": "TOGETHER_API_KEY",
-        "auth_header": "Authorization",
-        "auth_prefix": "Bearer ",
-    },
-    "openai": {
-        "name": "OpenAI",
-        "type": "llm",
-        "check_url": "https://api.openai.com/v1/models",
-        "env_key": "OPENAI_API_KEY",
         "auth_header": "Authorization",
         "auth_prefix": "Bearer ",
     },
