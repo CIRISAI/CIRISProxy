@@ -19,9 +19,10 @@ COPY hooks/custom_auth.py /app/custom_auth.py
 # Copy config
 COPY litellm_config.yaml /app/config.yaml
 
-# Copy health check script
+# Copy scripts
 COPY scripts/healthcheck.py /app/healthcheck.py
-RUN chmod +x /app/healthcheck.py
+COPY scripts/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/healthcheck.py /app/entrypoint.sh
 
 # Set working directory
 WORKDIR /app
@@ -29,5 +30,8 @@ WORKDIR /app
 # Ensure Python can find modules in /app
 ENV PYTHONPATH=/app
 
-# Default command (--detailed_debug helps troubleshoot callback loading)
-CMD ["--config", "/app/config.yaml", "--port", "4000", "--detailed_debug"]
+# Use our entrypoint that pre-loads the callback
+ENTRYPOINT ["/app/entrypoint.sh"]
+
+# Default command
+CMD ["--config", "/app/config.yaml", "--port", "4000"]

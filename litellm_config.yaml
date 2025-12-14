@@ -133,7 +133,8 @@ router_settings:
   # Fallback chain - Llama 4 Maverick across 3 providers
   # Pricing: OpenRouter $0.11/$0.34, Groq $0.50/$0.77, Together ~$0.50/$0.80 per 1M tokens
   fallbacks:
-    - "default": ["groq/llama-4-maverick", "together/llama-4-maverick", "groq/llama-3.3-70b"]
+    # Only fallback to other Llama 4 Maverick providers - never degrade to older models
+    - "default": ["groq/llama-4-maverick", "together/llama-4-maverick"]
     - "llama-4-maverick": ["groq/llama-4-maverick", "together/llama-4-maverick"]
     - "together/llama-4-maverick": ["groq/llama-4-maverick", "openrouter/llama-4-maverick"]
     - "groq/llama-4-maverick": ["openrouter/llama-4-maverick", "together/llama-4-maverick"]
