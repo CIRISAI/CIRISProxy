@@ -165,3 +165,9 @@ general_settings:
       target: "search_handler.handle_search_request"
       headers:
         litellm_user_api_key: "authorization"
+
+    # Status endpoint - health checks for all providers
+    # Used by CIRISLens for aggregated status monitoring
+    # No auth required - public endpoint
+    - path: "/v1/status"
+      target: "status_handler.get_status"
