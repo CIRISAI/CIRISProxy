@@ -673,8 +673,21 @@ class CIRISBillingCallback(CustomLogger):
         previous_error = metadata.get("previous_error", "")
         original_request_id = metadata.get("original_request_id", "")
 
-        # Log provider info at INFO level for debugging
+        # Log provider info and send to CIRISLens
+        log_data = {
+            "event": "llm_request",
+            "interaction_id": interaction_id,
+            "user_hash": _hash_id(external_id),
+            "model": actual_model,
+            "api_base": api_base[:50] if api_base else "default",
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+        }
+
         if retry_count > 0:
+            log_data["retry_count"] = retry_count
+            log_data["previous_error"] = previous_error
+            log_data["original_request_id"] = original_request_id[:8] if original_request_id else None
             logger.info(
                 "llm_request interaction=%s model=%s api_base=%s tokens=%d/%d RETRY=%d prev_error=%s orig_req=%s",
                 interaction_id[:8] if interaction_id else "none",
@@ -695,6 +708,9 @@ class CIRISBillingCallback(CustomLogger):
                 prompt_tokens,
                 completion_tokens,
             )
+
+        # Send to CIRISLens
+        _ship_log("INFO", "LLM request completed", **log_data)
 
         # Get cost from LiteLLM's hidden params
         hidden_params = getattr(response_obj, "_hidden_params", {})
