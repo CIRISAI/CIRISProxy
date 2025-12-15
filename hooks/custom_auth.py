@@ -58,6 +58,225 @@ def _cleanup_cache() -> None:
         del _token_cache[k]
 
 
+def _get_cached_auth(api_key: str) -> UserAPIKeyAuth | None:
+    """
+    Check cache for valid token and return auth if found.
+
+    Args:
+        api_key: The token to look up
+
+    Returns:
+        UserAPIKeyAuth if cached and valid, None otherwise
+    """
+    if api_key not in _token_cache:
+        return None
+
+    user_id, cache_until = _token_cache[api_key]
+    if time.time() < cache_until:
+        return UserAPIKeyAuth(
+            api_key=f"google:{user_id}",
+            user_id=user_id,
+        )
+
+    # Cache entry expired, remove it
+    del _token_cache[api_key]
+    return None
+
+
+def _import_google_auth():
+    """
+    Import Google auth libraries.
+
+    Returns:
+        Tuple of (id_token, google_requests, jwt) modules
+
+    Raises:
+        ProxyException: If google-auth is not installed
+    """
+    try:
+        from google.oauth2 import id_token
+        from google.auth.transport import requests as google_requests
+        from google.auth import jwt
+        return id_token, google_requests, jwt
+    except ImportError:
+        raise ProxyException(
+            message="Server misconfiguration: google-auth not installed",
+            type="server_error",
+            code=500,
+        )
+
+
+def _try_verify_token(api_key: str, id_token_module, google_requests) -> tuple[dict | None, Exception | None]:
+    """
+    Try to verify token against each valid client ID.
+
+    Args:
+        api_key: The token to verify
+        id_token_module: google.oauth2.id_token module
+        google_requests: google.auth.transport.requests module
+
+    Returns:
+        Tuple of (idinfo dict if successful, last_error if failed)
+    """
+    idinfo = None
+    last_error = None
+
+    for client_id in GOOGLE_CLIENT_IDS:
+        try:
+            idinfo = id_token_module.verify_oauth2_token(
+                api_key,
+                google_requests.Request(),
+                client_id
+            )
+            return idinfo, None  # Success
+        except Exception as e:
+            last_error = e
+            error_msg = str(e).lower()
+            # If token expired, stop trying other client IDs
+            if "expired" in error_msg:
+                break
+            # For other errors (including audience mismatch), try next client ID
+            continue
+
+    return None, last_error
+
+
+def _validate_expired_token_claims(idinfo: dict) -> None:
+    """
+    Validate audience and issuer claims from an expired token.
+
+    Args:
+        idinfo: Decoded token claims
+
+    Raises:
+        ProxyException: If audience or issuer is invalid
+    """
+    aud = idinfo.get("aud")
+    if aud not in GOOGLE_CLIENT_IDS:
+        raise ProxyException(
+            message="Invalid token audience",
+            type="auth_error",
+            param="Authorization",
+            code=401,
+        )
+
+    iss = idinfo.get("iss")
+    if iss not in ("accounts.google.com", "https://accounts.google.com"):
+        raise ProxyException(
+            message="Invalid token issuer",
+            type="auth_error",
+            param="Authorization",
+            code=401,
+        )
+
+
+def _handle_expired_token(api_key: str, jwt_module, last_error: Exception) -> dict:
+    """
+    Handle an expired token by decoding without verification.
+
+    Args:
+        api_key: The expired token
+        jwt_module: google.auth.jwt module
+        last_error: The expiration error from verification
+
+    Returns:
+        Decoded token claims if valid
+
+    Raises:
+        ProxyException: If token cannot be decoded or claims are invalid
+        Exception: Re-raises last_error if not an expiration error
+    """
+    error_msg = str(last_error).lower()
+    if "expired" not in error_msg:
+        raise last_error
+
+    try:
+        idinfo = jwt_module.decode(api_key, verify=False)
+        _validate_expired_token_claims(idinfo)
+        return idinfo
+    except ProxyException:
+        raise
+    except Exception as decode_error:
+        raise ProxyException(
+            message=f"Failed to decode expired token: {decode_error}",
+            type="auth_error",
+            param="Authorization",
+            code=401,
+        )
+
+
+def _extract_user_id(idinfo: dict) -> str:
+    """
+    Extract user ID from token claims.
+
+    Args:
+        idinfo: Decoded token claims
+
+    Returns:
+        The user ID (sub claim)
+
+    Raises:
+        ProxyException: If user ID is missing
+    """
+    user_id = idinfo.get("sub")
+    if not user_id:
+        raise ProxyException(
+            message="Invalid token: missing user ID",
+            type="auth_error",
+            param="Authorization",
+            code=401,
+        )
+    return user_id
+
+
+def _cache_token(api_key: str, user_id: str) -> None:
+    """
+    Cache a verified token.
+
+    Args:
+        api_key: The token to cache
+        user_id: The extracted user ID
+    """
+    cache_until = time.time() + _CACHE_DURATION_SECONDS
+    _cleanup_cache()
+    _token_cache[api_key] = (user_id, cache_until)
+
+
+def _handle_verification_error(error: Exception) -> None:
+    """
+    Convert a verification error to an appropriate ProxyException.
+
+    Args:
+        error: The verification error
+
+    Raises:
+        ProxyException: Always raises with appropriate message
+    """
+    error_msg = str(error).lower()
+
+    if "audience" in error_msg:
+        raise ProxyException(
+            message="Invalid token audience. Please use the correct app.",
+            type="auth_error",
+            param="Authorization",
+            code=401,
+        )
+    elif "expired" in error_msg:
+        raise ProxyException(
+            message="Token has expired. Please re-authenticate.",
+            type="auth_error",
+            param="Authorization",
+            code=401,
+        )
+    else:
+        raise ProxyException(
+            message="Invalid authentication token",
+            type="auth_error",
+            param="Authorization",
+            code=401,
+        )
+
+
 async def verify_google_token(token: str) -> dict | None:
     """
     Verify a Google ID token and return user info.
@@ -163,115 +382,26 @@ async def user_api_key_auth(request: Request, api_key: str) -> UserAPIKeyAuth | 
         )
 
     # Check cache first (avoids network call to Google)
-    if api_key in _token_cache:
-        user_id, cache_until = _token_cache[api_key]
-        if time.time() < cache_until:
-            return UserAPIKeyAuth(
-                api_key=f"google:{user_id}",
-                user_id=user_id,
-            )
-        else:
-            # Cache entry expired, remove it
-            del _token_cache[api_key]
+    cached_auth = _get_cached_auth(api_key)
+    if cached_auth:
+        return cached_auth
 
-    # Import here to avoid startup delay if google-auth isn't installed
-    try:
-        from google.oauth2 import id_token
-        from google.auth.transport import requests as google_requests
-        from google.auth import jwt
-    except ImportError:
-        raise ProxyException(
-            message="Server misconfiguration: google-auth not installed",
-            type="server_error",
-            code=500,
-        )
+    # Import Google auth libraries
+    id_token_module, google_requests, jwt_module = _import_google_auth()
 
     try:
         # Try verification with each valid client ID
-        idinfo = None
-        last_error = None
+        idinfo, last_error = _try_verify_token(api_key, id_token_module, google_requests)
 
-        for client_id in GOOGLE_CLIENT_IDS:
-            try:
-                idinfo = id_token.verify_oauth2_token(
-                    api_key,
-                    google_requests.Request(),
-                    client_id
-                )
-                break  # Success, stop trying
-            except Exception as e:
-                last_error = e
-                error_msg = str(e)
-                # If it's an audience mismatch, try next client ID
-                if "audience" in error_msg.lower():
-                    continue
-                # If token expired, handle separately
-                if "expired" in error_msg.lower():
-                    break  # Will handle below
-                # Other errors, try next client ID
-                continue
-
-        # If no valid verification succeeded, check for expired token
+        # If verification failed, try handling as expired token
         if idinfo is None and last_error:
-            error_msg = str(last_error)
-            if "expired" in error_msg.lower():
-                # Decode without verification to get claims
-                try:
-                    # Decode the token without verification to extract claims
-                    unverified = jwt.decode(api_key, verify=False)
+            idinfo = _handle_expired_token(api_key, jwt_module, last_error)
 
-                    # Extract claims from unverified token
-                    idinfo = unverified
+        # Extract and validate user ID
+        user_id = _extract_user_id(idinfo)
 
-                    # Manually verify audience against all valid client IDs
-                    aud = idinfo.get("aud")
-                    if aud not in GOOGLE_CLIENT_IDS:
-                        raise ProxyException(
-                            message="Invalid token audience",
-                            type="auth_error",
-                            param="Authorization",
-                            code=401,
-                        )
-
-                    # Verify issuer
-                    iss = idinfo.get("iss")
-                    if iss not in ("accounts.google.com", "https://accounts.google.com"):
-                        raise ProxyException(
-                            message="Invalid token issuer",
-                            type="auth_error",
-                            param="Authorization",
-                            code=401,
-                        )
-
-                except ProxyException:
-                    raise
-                except Exception as decode_error:
-                    raise ProxyException(
-                        message=f"Failed to decode expired token: {decode_error}",
-                        type="auth_error",
-                        param="Authorization",
-                        code=401,
-                    )
-            else:
-                # Re-raise last error if not expiration
-                raise last_error
-
-        # Extract user ID from the 'sub' (subject) claim
-        # This is the stable Google user ID that never changes
-        user_id = idinfo.get("sub")
-
-        if not user_id:
-            raise ProxyException(
-                message="Invalid token: missing user ID",
-                type="auth_error",
-                param="Authorization",
-                code=401,
-            )
-
-        # Cache the verified token for 24 hours (we don't check expiration)
-        cache_until = time.time() + _CACHE_DURATION_SECONDS
-        _cleanup_cache()
-        _token_cache[api_key] = (user_id, cache_until)
+        # Cache the verified token
+        _cache_token(api_key, user_id)
 
         # Return with google:{user_id} format for billing callback compatibility
         return UserAPIKeyAuth(
@@ -280,32 +410,6 @@ async def user_api_key_auth(request: Request, api_key: str) -> UserAPIKeyAuth | 
         )
 
     except ProxyException:
-        # Re-raise our own exceptions
         raise
     except Exception as e:
-        # Token verification failed (invalid signature, wrong audience, etc.)
-        # Don't expose internal error details to clients
-        error_msg = str(e).lower()
-
-        if "audience" in error_msg:
-            raise ProxyException(
-                message="Invalid token audience. Please use the correct app.",
-                type="auth_error",
-                param="Authorization",
-                code=401,
-            )
-        elif "expired" in error_msg:
-            raise ProxyException(
-                message="Token has expired. Please re-authenticate.",
-                type="auth_error",
-                param="Authorization",
-                code=401,
-            )
-        else:
-            # Generic error - don't leak internal details
-            raise ProxyException(
-                message="Invalid authentication token",
-                type="auth_error",
-                param="Authorization",
-                code=401,
-            )
+        _handle_verification_error(e)
