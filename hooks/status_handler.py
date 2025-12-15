@@ -17,6 +17,11 @@ from typing import Any
 
 import httpx
 
+# Cache for rate limiting - prevents hammering upstream providers
+_status_cache: dict[str, Any] = {}
+_cache_timestamp: float = 0
+CACHE_TTL_SECONDS = 10  # Cache status for 10 seconds
+
 # Status levels
 STATUS_OPERATIONAL = "operational"
 STATUS_DEGRADED = "degraded"
@@ -155,10 +160,12 @@ async def check_provider(
         result["error"] = "Timeout"
     except httpx.RequestError as e:
         result["latency_ms"] = int((time.monotonic() - start_time) * 1000)
+        # Only expose error type, not full message (may contain sensitive data)
         result["error"] = f"Connection error: {type(e).__name__}"
-    except Exception as e:
+    except Exception:
         result["latency_ms"] = int((time.monotonic() - start_time) * 1000)
-        result["error"] = str(e)[:100]
+        # Never expose raw exception messages - may contain API keys or internal details
+        result["error"] = "Internal error"
 
     return result
 
@@ -166,6 +173,8 @@ async def check_provider(
 async def get_status() -> dict[str, Any]:
     """
     Get status for all providers.
+
+    Returns cached response if within TTL to prevent upstream API abuse.
 
     Returns:
         {
@@ -175,6 +184,13 @@ async def get_status() -> dict[str, Any]:
             "providers": [...]
         }
     """
+    global _status_cache, _cache_timestamp
+
+    # Return cached response if still valid (rate limiting)
+    now = time.monotonic()
+    if _status_cache and (now - _cache_timestamp) < CACHE_TTL_SECONDS:
+        return _status_cache
+
     async with httpx.AsyncClient() as client:
         # Check all providers concurrently
         tasks = [
@@ -198,13 +214,17 @@ async def get_status() -> dict[str, Any]:
     else:
         overall_status = STATUS_DEGRADED
 
-    return {
+    # Cache the result
+    _status_cache = {
         "service": "cirisproxy",
         "version": os.environ.get("CIRISPROXY_VERSION", "unknown"),
         "status": overall_status,
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "providers": results,
     }
+    _cache_timestamp = now
+
+    return _status_cache
 
 
 # Sync wrapper for non-async contexts

@@ -38,12 +38,13 @@ def add_custom_routes(app: FastAPI) -> None:
         try:
             status = await get_status()
             return JSONResponse(content=status)
-        except Exception as e:
+        except Exception:
+            # Never expose raw exception messages - may contain sensitive data
             return JSONResponse(
                 content={
                     "service": "cirisproxy",
                     "status": "outage",
-                    "error": str(e),
+                    "error": "Internal error",
                 },
                 status_code=500,
             )
