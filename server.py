@@ -58,10 +58,12 @@ def add_custom_routes(app: FastAPI) -> None:
         """
         return JSONResponse(content={"status": "ok", "service": "cirisproxy"})
 
-    @app.post("/v1/search")
+    @app.post("/v1/web/search")
     async def search_endpoint(request: Request):
         """
         Web search endpoint with billing integration.
+
+        Path: /v1/web/search (not /v1/search to avoid LiteLLM conflict)
 
         Requires:
         - Authorization: Bearer <google_id_token>
