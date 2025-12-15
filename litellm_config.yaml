@@ -132,6 +132,22 @@ router_settings:
   num_retries: 2
   retry_after: 1
 
+  # Error-specific retry policies
+  # On retry, LiteLLM picks a different deployment from the pool
+  retry_policy:
+    TimeoutErrorRetries: 1
+    RateLimitErrorRetries: 2
+    InternalServerErrorRetries: 1
+
+  # Cooldown triggers - provider excluded after N failures per minute
+  allowed_fails_policy:
+    TimeoutErrorAllowedFails: 3
+    RateLimitErrorAllowedFails: 5
+    InternalServerErrorAllowedFails: 3
+
+  # Seconds to exclude a failing provider from routing
+  cooldown_time: 60
+
   # Fallback chain - Llama 4 Maverick across 3 providers
   # Pricing: OpenRouter $0.11/$0.34, Groq $0.50/$0.77, Together ~$0.50/$0.80 per 1M tokens
   fallbacks:
