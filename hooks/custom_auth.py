@@ -59,6 +59,85 @@ def _cleanup_cache() -> None:
         del _token_cache[k]
 
 
+async def verify_google_token(token: str) -> dict | None:
+    """
+    Verify a Google ID token and return user info.
+
+    This is a reusable function for endpoints that need Google auth
+    but aren't using LiteLLM's auth middleware (e.g., /v1/web/search).
+
+    Args:
+        token: Google ID token (JWT)
+
+    Returns:
+        dict with 'sub' (user ID) and other claims, or None if invalid
+    """
+    if not token:
+        return None
+
+    # Check cache first
+    if token in _token_cache:
+        user_id, cache_until = _token_cache[token]
+        if time.time() < cache_until:
+            return {"sub": user_id}
+        else:
+            del _token_cache[token]
+
+    try:
+        from google.oauth2 import id_token
+        from google.auth.transport import requests as google_requests
+        from google.auth import jwt
+    except ImportError:
+        return None
+
+    try:
+        idinfo = None
+        last_error = None
+
+        for client_id in GOOGLE_CLIENT_IDS:
+            try:
+                idinfo = id_token.verify_oauth2_token(
+                    token,
+                    google_requests.Request(),
+                    client_id
+                )
+                break
+            except Exception as e:
+                last_error = e
+                error_msg = str(e)
+                if "expired" in error_msg.lower():
+                    break
+                continue
+
+        # Handle expired tokens (still accept them)
+        if idinfo is None and last_error and "expired" in str(last_error).lower():
+            try:
+                unverified = jwt.decode(token, verify=False)
+                aud = unverified.get("aud")
+                iss = unverified.get("iss")
+                if aud in GOOGLE_CLIENT_IDS and iss in ("accounts.google.com", "https://accounts.google.com"):
+                    idinfo = unverified
+            except Exception:
+                return None
+
+        if idinfo is None:
+            return None
+
+        user_id = idinfo.get("sub")
+        if not user_id:
+            return None
+
+        # Cache the result
+        cache_until = time.time() + _CACHE_DURATION_SECONDS
+        _cleanup_cache()
+        _token_cache[token] = (user_id, cache_until)
+
+        return idinfo
+
+    except Exception:
+        return None
+
+
 async def user_api_key_auth(request: Request, api_key: str) -> Union[UserAPIKeyAuth, str]:
     """
     Verify Google ID token and extract user identity.
