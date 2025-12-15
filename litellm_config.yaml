@@ -97,11 +97,13 @@ model_list:
     litellm_params:
       model: "openrouter/meta-llama/llama-4-maverick"
       api_key: "os.environ/OPENROUTER_API_KEY"
+      max_tokens: 16384  # Allow long outputs for agent responses
 
   - model_name: "fast"
     litellm_params:
       model: "groq/meta-llama/llama-4-maverick-17b-128e-instruct"
       api_key: "os.environ/GROQ_API_KEY"
+      max_tokens: 16384  # Allow long outputs for agent responses
 
 litellm_settings:
   # Custom callback for CIRISBilling integration
