@@ -145,16 +145,16 @@ general_settings:
   # Master key for admin operations (not for client auth)
   master_key: "os.environ/LITELLM_MASTER_KEY"
 
-  # Custom auth function - bypasses database and lets our callback handle auth
+  # Custom auth function - validates Google ID tokens
   # See: https://docs.litellm.ai/docs/proxy/custom_auth
   custom_auth: "custom_auth.user_api_key_auth"
 
-  # Enable custom auth mode (required to bypass database auth)
-  enable_jwt_auth: false
-  use_custom_auth: true
-
-  # Disable the built-in database (we use CIRISBilling)
+  # Disable the built-in database (we use CIRISBilling for billing)
   database_url: null
+
+  # CRITICAL: Allow requests when DB is unavailable (required for custom auth without DB)
+  # Without this, LiteLLM returns "No connected db" error
+  allow_requests_on_db_unavailable: true
 
   # Allow all origins for mobile clients
   # In production, restrict to specific origins if needed
