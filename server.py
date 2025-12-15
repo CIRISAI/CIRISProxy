@@ -5,7 +5,7 @@ Wraps LiteLLM proxy with custom endpoints:
 - /v1/status - Provider health monitoring
 - /v1/search - Web search with billing (future)
 
-This approach adds routes to LiteLLM's FastAPI app before startup.
+This approach properly initializes LiteLLM with config, then adds custom routes.
 """
 
 import asyncio
@@ -31,7 +31,7 @@ def add_custom_routes(app: FastAPI) -> None:
         Provider health status endpoint.
 
         Returns health status for all CIRISProxy providers:
-        - LLM: OpenRouter, Groq, Together AI, OpenAI
+        - LLM: OpenRouter, Groq, Together AI
         - Billing: CIRISBilling
         - Search: Brave Search
         """
@@ -60,12 +60,23 @@ def add_custom_routes(app: FastAPI) -> None:
 
 def main():
     """
-    Main entry point - imports LiteLLM and adds custom routes.
+    Main entry point - initializes LiteLLM with config and adds custom routes.
 
-    This is called by the entrypoint script before starting uvicorn.
+    IMPORTANT: Must call ProxyStartupEvent to load config (including custom_auth).
+    Simply importing the app doesn't load the config file.
     """
-    # Import LiteLLM's app
-    from litellm.proxy.proxy_server import app
+    config_path = os.environ.get("LITELLM_CONFIG_PATH", "/app/config.yaml")
+
+    # Import LiteLLM components
+    from litellm.proxy.proxy_server import app, ProxyStartupEvent
+
+    # Initialize LiteLLM with config - this loads custom_auth, callbacks, etc.
+    print(f"[CIRISProxy] Loading config from {config_path}")
+    startup_event = ProxyStartupEvent()
+    asyncio.get_event_loop().run_until_complete(
+        startup_event.initialize(config_path=config_path)
+    )
+    print("[CIRISProxy] LiteLLM initialized with config")
 
     # Add our custom routes
     add_custom_routes(app)
