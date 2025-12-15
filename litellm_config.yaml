@@ -146,7 +146,12 @@ general_settings:
   master_key: "os.environ/LITELLM_MASTER_KEY"
 
   # Custom auth function - bypasses database and lets our callback handle auth
+  # See: https://docs.litellm.ai/docs/proxy/custom_auth
   custom_auth: "custom_auth.user_api_key_auth"
+
+  # Enable custom auth mode (required to bypass database auth)
+  enable_jwt_auth: false
+  use_custom_auth: true
 
   # Disable the built-in database (we use CIRISBilling)
   database_url: null
