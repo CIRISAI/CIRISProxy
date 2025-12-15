@@ -149,11 +149,16 @@ general_settings:
   # See: https://docs.litellm.ai/docs/proxy/custom_auth
   custom_auth: "custom_auth.user_api_key_auth"
 
+  # CRITICAL: Use ONLY custom auth, bypass database auth entirely
+  # mode: "on" = only custom auth (no DB fallback)
+  # mode: "auto" = custom auth first, then DB fallback
+  custom_auth_settings:
+    mode: "on"
+
   # Disable the built-in database (we use CIRISBilling for billing)
   database_url: null
 
-  # CRITICAL: Allow requests when DB is unavailable (required for custom auth without DB)
-  # Without this, LiteLLM returns "No connected db" error
+  # Allow requests when DB is unavailable (belt and suspenders)
   allow_requests_on_db_unavailable: true
 
   # Allow all origins for mobile clients
