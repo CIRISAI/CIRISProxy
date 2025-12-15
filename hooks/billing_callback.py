@@ -668,15 +668,33 @@ class CIRISBillingCallback(CustomLogger):
         actual_model = litellm_params.get("model", model)
         api_base = litellm_params.get("api_base", "")
 
+        # Extract retry metadata if present (agent sends this on retries)
+        retry_count = metadata.get("retry_count", 0)
+        previous_error = metadata.get("previous_error", "")
+        original_request_id = metadata.get("original_request_id", "")
+
         # Log provider info at INFO level for debugging
-        logger.info(
-            "llm_request interaction=%s model=%s api_base=%s tokens=%d/%d",
-            interaction_id[:8] if interaction_id else "none",
-            actual_model,
-            api_base[:30] if api_base else "default",
-            prompt_tokens,
-            completion_tokens,
-        )
+        if retry_count > 0:
+            logger.info(
+                "llm_request interaction=%s model=%s api_base=%s tokens=%d/%d RETRY=%d prev_error=%s orig_req=%s",
+                interaction_id[:8] if interaction_id else "none",
+                actual_model,
+                api_base[:30] if api_base else "default",
+                prompt_tokens,
+                completion_tokens,
+                retry_count,
+                previous_error,
+                original_request_id[:8] if original_request_id else "none",
+            )
+        else:
+            logger.info(
+                "llm_request interaction=%s model=%s api_base=%s tokens=%d/%d",
+                interaction_id[:8] if interaction_id else "none",
+                actual_model,
+                api_base[:30] if api_base else "default",
+                prompt_tokens,
+                completion_tokens,
+            )
 
         # Get cost from LiteLLM's hidden params
         hidden_params = getattr(response_obj, "_hidden_params", {})
