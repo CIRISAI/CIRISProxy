@@ -277,6 +277,73 @@ def _handle_verification_error(error: Exception) -> None:
         )
 
 
+# Helper functions for verify_google_token (return None on error, never raise)
+
+
+def _get_cached_idinfo(token: str) -> dict | None:
+    """
+    Check cache for valid token and return idinfo if found.
+
+    Args:
+        token: The token to look up
+
+    Returns:
+        dict with 'sub' key if cached and valid, None otherwise
+    """
+    if token not in _token_cache:
+        return None
+
+    user_id, cache_until = _token_cache[token]
+    if time.time() < cache_until:
+        return {"sub": user_id}
+
+    # Cache entry expired, remove it
+    del _token_cache[token]
+    return None
+
+
+def _try_import_google_auth_silent():
+    """
+    Import Google auth libraries silently.
+
+    Returns:
+        Tuple of (id_token, google_requests, jwt) or None if not installed
+    """
+    try:
+        from google.oauth2 import id_token
+        from google.auth.transport import requests as google_requests
+        from google.auth import jwt
+        return id_token, google_requests, jwt
+    except ImportError:
+        return None
+
+
+def _try_decode_expired_token_silent(token: str, jwt_module, last_error: Exception | None) -> dict | None:
+    """
+    Try to decode an expired token without verification.
+
+    Args:
+        token: The token to decode
+        jwt_module: google.auth.jwt module
+        last_error: The error from verification (to check if expired)
+
+    Returns:
+        dict with claims if valid expired token, None otherwise
+    """
+    if not last_error or "expired" not in str(last_error).lower():
+        return None
+
+    try:
+        unverified = jwt_module.decode(token, verify=False)
+        aud = unverified.get("aud")
+        iss = unverified.get("iss")
+        if aud in GOOGLE_CLIENT_IDS and iss in ("accounts.google.com", "https://accounts.google.com"):
+            return unverified
+    except Exception:
+        pass
+    return None
+
+
 async def verify_google_token(token: str) -> dict | None:
     """
     Verify a Google ID token and return user info.
@@ -294,62 +361,34 @@ async def verify_google_token(token: str) -> dict | None:
         return None
 
     # Check cache first
-    if token in _token_cache:
-        user_id, cache_until = _token_cache[token]
-        if time.time() < cache_until:
-            return {"sub": user_id}
-        else:
-            del _token_cache[token]
+    cached = _get_cached_idinfo(token)
+    if cached:
+        return cached
 
-    try:
-        from google.oauth2 import id_token
-        from google.auth.transport import requests as google_requests
-        from google.auth import jwt
-    except ImportError:
+    # Import google auth libraries
+    modules = _try_import_google_auth_silent()
+    if not modules:
         return None
+    id_token_module, google_requests, jwt_module = modules
 
     try:
-        idinfo = None
-        last_error = None
-
-        for client_id in GOOGLE_CLIENT_IDS:
-            try:
-                idinfo = id_token.verify_oauth2_token(
-                    token,
-                    google_requests.Request(),
-                    client_id
-                )
-                break
-            except Exception as e:
-                last_error = e
-                error_msg = str(e)
-                if "expired" in error_msg.lower():
-                    break
-                continue
+        # Try verification with each client ID
+        idinfo, last_error = _try_verify_token(token, id_token_module, google_requests)
 
         # Handle expired tokens (still accept them)
-        if idinfo is None and last_error and "expired" in str(last_error).lower():
-            try:
-                unverified = jwt.decode(token, verify=False)
-                aud = unverified.get("aud")
-                iss = unverified.get("iss")
-                if aud in GOOGLE_CLIENT_IDS and iss in ("accounts.google.com", "https://accounts.google.com"):
-                    idinfo = unverified
-            except Exception:
-                return None
+        if idinfo is None:
+            idinfo = _try_decode_expired_token_silent(token, jwt_module, last_error)
 
         if idinfo is None:
             return None
 
+        # Validate user ID exists
         user_id = idinfo.get("sub")
         if not user_id:
             return None
 
-        # Cache the result
-        cache_until = time.time() + _CACHE_DURATION_SECONDS
-        _cleanup_cache()
-        _token_cache[token] = (user_id, cache_until)
-
+        # Cache and return
+        _cache_token(token, user_id)
         return idinfo
 
     except Exception:
