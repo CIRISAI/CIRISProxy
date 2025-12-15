@@ -662,18 +662,14 @@ class CIRISBillingCallback(CustomLogger):
             )
             raise BillingServiceUnavailableError("Billing service unavailable. Please try again later.")
 
-    async def async_log_success_event(
-        self,
-        kwargs: dict[str, Any],
-        response_obj: Any,
-        start_time: datetime,
-        end_time: datetime,
-    ) -> None:
+    def _extract_success_metadata(
+        self, kwargs: dict[str, Any]
+    ) -> tuple[str | None, str | None, str | None, dict[str, Any], dict[str, Any]]:
         """
-        Post-success: Charge and log usage.
+        Extract metadata from kwargs for success event processing.
 
-        Called after every successful LLM response. We call /charge on every
-        request (idempotent) and log usage for analytics.
+        Returns:
+            Tuple of (oauth_provider, external_id, interaction_id, metadata, litellm_params)
         """
         litellm_params = kwargs.get("litellm_params", {})
         metadata = litellm_params.get("metadata", {})
@@ -682,34 +678,69 @@ class CIRISBillingCallback(CustomLogger):
         external_id = metadata.get("_ciris_external_id")
         interaction_id = metadata.get("_ciris_interaction_id")
 
-        if not external_id or not interaction_id:
-            return
+        return oauth_provider, external_id, interaction_id, metadata, litellm_params
 
-        # Extract usage data from response
+    def _extract_usage_data(
+        self,
+        response_obj: Any,
+        kwargs: dict[str, Any],
+        litellm_params: dict[str, Any],
+        start_time: datetime,
+        end_time: datetime,
+    ) -> dict[str, Any]:
+        """
+        Extract usage data from response object.
+
+        Returns:
+            Dict with usage metrics (tokens, cost, duration, model info)
+        """
         usage = getattr(response_obj, "usage", None)
         prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0 if usage else 0
         completion_tokens = getattr(usage, "completion_tokens", 0) or 0 if usage else 0
         model = kwargs.get("model", "unknown")
 
-        # Extract provider info for debugging
-        # LiteLLM stores the actual model/provider used in litellm_params
         actual_model = litellm_params.get("model", model)
         api_base = litellm_params.get("api_base", "")
 
-        # Extract retry metadata if present (agent sends this on retries)
+        hidden_params = getattr(response_obj, "_hidden_params", {})
+        cost_dollars = 0.0
+        if isinstance(hidden_params, dict):
+            cost_dollars = hidden_params.get("response_cost", 0) or 0
+
+        duration_ms = 0
+        if start_time and end_time:
+            duration_ms = int((end_time - start_time).total_seconds() * 1000)
+
+        return {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "model": model,
+            "actual_model": actual_model,
+            "api_base": api_base,
+            "cost_dollars": cost_dollars,
+            "duration_ms": duration_ms,
+        }
+
+    def _log_llm_request(
+        self,
+        interaction_id: str,
+        external_id: str,
+        usage_data: dict[str, Any],
+        metadata: dict[str, Any],
+    ) -> None:
+        """Log LLM request to logger and CIRISLens."""
         retry_count = metadata.get("retry_count", 0)
         previous_error = metadata.get("previous_error", "")
         original_request_id = metadata.get("original_request_id", "")
 
-        # Log provider info and send to CIRISLens
         log_data = {
             "event": "llm_request",
             "interaction_id": interaction_id,
             "user_hash": _hash_id(external_id),
-            "model": actual_model,
-            "api_base": api_base[:50] if api_base else "default",
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
+            "model": usage_data["actual_model"],
+            "api_base": usage_data["api_base"][:50] if usage_data["api_base"] else "default",
+            "prompt_tokens": usage_data["prompt_tokens"],
+            "completion_tokens": usage_data["completion_tokens"],
         }
 
         if retry_count > 0:
@@ -719,10 +750,10 @@ class CIRISBillingCallback(CustomLogger):
             logger.info(
                 "llm_request interaction=%s model=%s api_base=%s tokens=%d/%d RETRY=%d prev_error=%s orig_req=%s",
                 interaction_id[:8] if interaction_id else "none",
-                actual_model,
-                api_base[:30] if api_base else "default",
-                prompt_tokens,
-                completion_tokens,
+                usage_data["actual_model"],
+                usage_data["api_base"][:30] if usage_data["api_base"] else "default",
+                usage_data["prompt_tokens"],
+                usage_data["completion_tokens"],
                 retry_count,
                 previous_error,
                 original_request_id[:8] if original_request_id else "none",
@@ -731,36 +762,32 @@ class CIRISBillingCallback(CustomLogger):
             logger.info(
                 "llm_request interaction=%s model=%s api_base=%s tokens=%d/%d",
                 interaction_id[:8] if interaction_id else "none",
-                actual_model,
-                api_base[:30] if api_base else "default",
-                prompt_tokens,
-                completion_tokens,
+                usage_data["actual_model"],
+                usage_data["api_base"][:30] if usage_data["api_base"] else "default",
+                usage_data["prompt_tokens"],
+                usage_data["completion_tokens"],
             )
 
-        # Send to CIRISLens
         _ship_log("INFO", "LLM request completed", **log_data)
 
-        # Get cost from LiteLLM's hidden params
-        hidden_params = getattr(response_obj, "_hidden_params", {})
-        cost_dollars = 0.0
-        if isinstance(hidden_params, dict):
-            cost_dollars = hidden_params.get("response_cost", 0) or 0
-
-        # Calculate duration
-        duration_ms = 0
-        if start_time and end_time:
-            duration_ms = int((end_time - start_time).total_seconds() * 1000)
-
-        # Charge the interaction (idempotent via idempotency_key - first call charges, rest are no-ops)
+    async def _charge_interaction(
+        self,
+        oauth_provider: str,
+        external_id: str,
+        interaction_id: str,
+        model: str,
+    ) -> None:
+        """
+        Charge the interaction (idempotent - first call charges, rest are no-ops).
+        """
         try:
             client = await self._get_client()
-            # Use new /charges endpoint (replaces /litellm/charge)
             resp = await client.post(
                 f"{self.billing_url}/v1/billing/charges",
                 json={
                     "oauth_provider": oauth_provider,
                     "external_id": external_id,
-                    "amount_minor": 1,  # 1 credit
+                    "amount_minor": 1,
                     "currency": "USD",
                     "description": f"LiteLLM interaction: {interaction_id}",
                     "idempotency_key": f"litellm:{interaction_id}",
@@ -768,7 +795,6 @@ class CIRISBillingCallback(CustomLogger):
             )
 
             if resp.status_code == 201:
-                # New charge created
                 result = resp.json()
                 logger.debug(
                     "interaction=%s charge=new balance_after=%s",
@@ -785,12 +811,7 @@ class CIRISBillingCallback(CustomLogger):
                     model=model,
                 )
             elif resp.status_code in (200, 409):
-                # 200 or 409 = idempotent (charge already exists for this interaction)
-                # This is expected - we charge on every LLM call but only first succeeds
-                logger.debug(
-                    "interaction=%s charge=idempotent",
-                    interaction_id,
-                )
+                logger.debug("interaction=%s charge=idempotent", interaction_id)
             else:
                 logger.warning(
                     "interaction=%s charge=failed status=%d body=%s",
@@ -818,14 +839,26 @@ class CIRISBillingCallback(CustomLogger):
                 error_type=type(e).__name__,
             )
 
-        # Aggregate usage for this interaction (in-memory tracking)
-        usage_data = self._interaction_usage[interaction_id]
-        usage_data["llm_calls"] += 1
-        usage_data["prompt_tokens"] += prompt_tokens
-        usage_data["completion_tokens"] += completion_tokens
-        usage_data["models"].add(model)
-        usage_data["cost_cents"] += cost_dollars * 100
-        usage_data["duration_ms"] += duration_ms
+    def _aggregate_usage(
+        self,
+        interaction_id: str,
+        usage_data: dict[str, Any],
+    ) -> None:
+        """Aggregate usage data in memory and update global stats."""
+        model = usage_data["model"]
+        prompt_tokens = usage_data["prompt_tokens"]
+        completion_tokens = usage_data["completion_tokens"]
+        cost_dollars = usage_data["cost_dollars"]
+        duration_ms = usage_data["duration_ms"]
+
+        # Update interaction-level stats
+        interaction_usage = self._interaction_usage[interaction_id]
+        interaction_usage["llm_calls"] += 1
+        interaction_usage["prompt_tokens"] += prompt_tokens
+        interaction_usage["completion_tokens"] += completion_tokens
+        interaction_usage["models"].add(model)
+        interaction_usage["cost_cents"] += cost_dollars * 100
+        interaction_usage["duration_ms"] += duration_ms
 
         # Update global aggregate stats
         _global_usage["total_llm_calls"] += 1
@@ -834,7 +867,7 @@ class CIRISBillingCallback(CustomLogger):
         _global_usage["total_cost_cents"] += cost_dollars * 100
         _global_usage["models_used"][model] += 1
 
-        # Print usage on every call for visibility (every 10 calls print aggregate)
+        # Print aggregate stats every 10 calls
         if _global_usage["total_llm_calls"] % 10 == 0:
             print(
                 f"[CIRIS USAGE] AGGREGATE: calls={_global_usage['total_llm_calls']} "
@@ -845,26 +878,62 @@ class CIRISBillingCallback(CustomLogger):
                 flush=True
             )
 
-        # Stream usage data to billing service on every call (fire-and-forget)
-        # This ensures usage is logged even if interaction never explicitly completes
+    async def async_log_success_event(
+        self,
+        kwargs: dict[str, Any],
+        response_obj: Any,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> None:
+        """
+        Post-success: Charge and log usage.
+
+        Called after every successful LLM response. We call /charge on every
+        request (idempotent) and log usage for analytics.
+        """
+        # Extract metadata
+        oauth_provider, external_id, interaction_id, metadata, litellm_params = (
+            self._extract_success_metadata(kwargs)
+        )
+
+        if not external_id or not interaction_id:
+            return
+
+        # Extract usage data
+        usage_data = self._extract_usage_data(
+            response_obj, kwargs, litellm_params, start_time, end_time
+        )
+
+        # Log the request
+        self._log_llm_request(interaction_id, external_id, usage_data, metadata)
+
+        # Charge the interaction (idempotent)
+        await self._charge_interaction(
+            oauth_provider, external_id, interaction_id, usage_data["model"]
+        )
+
+        # Aggregate usage stats
+        self._aggregate_usage(interaction_id, usage_data)
+
+        # Stream usage to billing service
         await self._stream_usage_to_billing(
             oauth_provider=oauth_provider,
             external_id=external_id,
             interaction_id=interaction_id,
-            model=model,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            cost_cents=cost_dollars * 100,
-            duration_ms=duration_ms,
+            model=usage_data["model"],
+            prompt_tokens=usage_data["prompt_tokens"],
+            completion_tokens=usage_data["completion_tokens"],
+            cost_cents=usage_data["cost_dollars"] * 100,
+            duration_ms=usage_data["duration_ms"],
         )
 
         logger.debug(
             "interaction=%s calls=%d model=%s tokens=%d/%d",
             interaction_id,
-            usage_data["llm_calls"],
-            model,
-            usage_data["prompt_tokens"],
-            usage_data["completion_tokens"],
+            self._interaction_usage[interaction_id]["llm_calls"],
+            usage_data["model"],
+            self._interaction_usage[interaction_id]["prompt_tokens"],
+            self._interaction_usage[interaction_id]["completion_tokens"],
         )
 
     async def async_log_failure_event(
