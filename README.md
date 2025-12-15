@@ -56,4 +56,4 @@ pytest --cov=hooks --cov-report=term-missing
 
 ## License
 
-Proprietary - CIRIS Project
+Apache License 2.0 - See [LICENSE](LICENSE) for details.

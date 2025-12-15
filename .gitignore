@@ -2,6 +2,13 @@
 .env
 .env.local
 .env.*.local
+.env.production
+.env.staging
+
+# Certificates and keys
+*.pem
+*.key
+*.crt
 
 # Python
 __pycache__/

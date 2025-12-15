@@ -285,18 +285,27 @@ async def user_api_key_auth(request: Request, api_key: str) -> Union[UserAPIKeyA
         raise
     except Exception as e:
         # Token verification failed (invalid signature, wrong audience, etc.)
-        error_msg = str(e)
+        # Don't expose internal error details to clients
+        error_msg = str(e).lower()
 
-        if "audience" in error_msg.lower():
+        if "audience" in error_msg:
             raise ProxyException(
                 message="Invalid token audience. Please use the correct app.",
                 type="auth_error",
                 param="Authorization",
                 code=401,
             )
-        else:
+        elif "expired" in error_msg:
             raise ProxyException(
-                message=f"Invalid Google ID token: {error_msg}",
+                message="Token has expired. Please re-authenticate.",
+                type="auth_error",
+                param="Authorization",
+                code=401,
+            )
+        else:
+            # Generic error - don't leak internal details
+            raise ProxyException(
+                message="Invalid authentication token",
                 type="auth_error",
                 param="Authorization",
                 code=401,
