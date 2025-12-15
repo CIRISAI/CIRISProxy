@@ -327,7 +327,7 @@ class CIRISBillingCallback(CustomLogger):
             return DEFAULT_OAUTH_PROVIDER, ""
 
         if api_key.startswith("google:"):
-            return DEFAULT_OAUTH_PROVIDER, api_key[7:]  # len("google:") = 7
+            return DEFAULT_OAUTH_PROVIDER, api_key[7:]  # Skip "google:" prefix
         elif ":" in api_key:
             provider, user_id = api_key.split(":", 1)
             return f"oauth:{provider}", user_id

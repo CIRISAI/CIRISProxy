@@ -42,6 +42,7 @@ import requests
 SONAR_TOKEN_FILE = Path.home() / ".sonartoken"
 SONAR_API_BASE = "https://sonarcloud.io/api"
 PROJECT_KEY = "CIRISAI_CIRISProxy"
+UTC_OFFSET = "+00:00"
 
 
 class SonarClient:
@@ -256,7 +257,7 @@ def format_time_ago(iso_timestamp: str) -> str:
     """
     try:
         # Parse ISO timestamp
-        dt = datetime.fromisoformat(iso_timestamp.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(iso_timestamp.replace("Z", UTC_OFFSET))
         now = datetime.now(timezone.utc)
         delta = now - dt
 
@@ -316,7 +317,7 @@ def format_quality_gate_summary(qg_status: Dict[str, Any], label: str, timestamp
 def format_hotspot(hotspot: Dict[str, Any]) -> str:
     """Format a security hotspot for display."""
     file_path = hotspot["component"].split(":")[-1]
-    created = datetime.fromisoformat(hotspot["creationDate"].replace("Z", "+00:00"))
+    created = datetime.fromisoformat(hotspot["creationDate"].replace("Z", UTC_OFFSET))
     created_str = created.strftime("%Y-%m-%d")
 
     return (
@@ -331,7 +332,7 @@ def format_hotspot(hotspot: Dict[str, Any]) -> str:
 def format_issue(issue: Dict[str, Any]) -> str:
     """Format an issue for display."""
     file_path = issue["component"].split(":")[-1]
-    created = datetime.fromisoformat(issue["creationDate"].replace("Z", "+00:00"))
+    created = datetime.fromisoformat(issue["creationDate"].replace("Z", UTC_OFFSET))
     created_str = created.strftime("%Y-%m-%d")
 
     return (
@@ -369,7 +370,7 @@ def main():
     reopen_parser.add_argument("issue_key", help="Issue key to reopen")
 
     # Stats
-    stats_parser = subparsers.add_parser("stats", help="Show issue statistics")
+    subparsers.add_parser("stats", help="Show issue statistics")
 
     # Comment
     comment_parser = subparsers.add_parser("comment", help="Add comment to an issue")
@@ -377,10 +378,10 @@ def main():
     comment_parser.add_argument("comment", help="Comment text")
 
     # Quality Gate (PR + Main status)
-    qg_parser = subparsers.add_parser("quality-gate", help="Show quality gate status (PR + main)")
+    subparsers.add_parser("quality-gate", help="Show quality gate status (PR + main)")
 
     # Status (Main branch only)
-    status_parser = subparsers.add_parser("status", help="Show main branch status only")
+    subparsers.add_parser("status", help="Show main branch status only")
 
     # Security Hotspots
     hotspots_parser = subparsers.add_parser("hotspots", help="List security hotspots")
@@ -518,7 +519,7 @@ def main():
                         if pr_analyses.get("analyses"):
                             pr_timestamp = pr_analyses["analyses"][0]["date"]
                         print(f"{format_quality_gate_summary(pr_qg, f'PR #{pr_num} ({branch_name})', pr_timestamp)}")
-                    except requests.exceptions.HTTPError as pr_error:
+                    except requests.exceptions.HTTPError:
                         # Fall back to branch-based query
                         try:
                             branch_qg = client.get_quality_gate_status(branch=branch_name)
@@ -529,7 +530,7 @@ def main():
                             print(
                                 f"{format_quality_gate_summary(branch_qg, f'PR #{pr_num} ({branch_name})', branch_timestamp)}"
                             )
-                        except Exception as branch_error:
+                        except Exception:
                             print(f"❌ PR #{pr_num} ({branch_name}): No SonarCloud analysis yet")
             else:
                 print("\nNo recent open PRs found.")
