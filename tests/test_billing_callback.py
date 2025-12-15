@@ -733,3 +733,183 @@ class TestClientManagement:
         await callback.close()
 
         assert callback._client is None
+
+
+class TestIsMultimodalRequest:
+    """Tests for _is_multimodal_request helper function."""
+
+    def test_text_only_message(self):
+        """Test text-only message returns False."""
+        from hooks.billing_callback import _is_multimodal_request
+
+        data = {"messages": [{"role": "user", "content": "Hello, how are you?"}]}
+        assert _is_multimodal_request(data) is False
+
+    def test_message_with_image_url(self):
+        """Test message with image_url returns True."""
+        from hooks.billing_callback import _is_multimodal_request
+
+        data = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "What's in this image?"},
+                        {"type": "image_url", "image_url": {"url": "https://example.com/image.png"}},
+                    ],
+                }
+            ]
+        }
+        assert _is_multimodal_request(data) is True
+
+    def test_empty_messages(self):
+        """Test empty messages returns False."""
+        from hooks.billing_callback import _is_multimodal_request
+
+        data = {"messages": []}
+        assert _is_multimodal_request(data) is False
+
+    def test_no_messages_key(self):
+        """Test missing messages key returns False."""
+        from hooks.billing_callback import _is_multimodal_request
+
+        data = {}
+        assert _is_multimodal_request(data) is False
+
+    def test_array_content_without_image(self):
+        """Test array content without image_url returns False."""
+        from hooks.billing_callback import _is_multimodal_request
+
+        data = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Just text"},
+                    ],
+                }
+            ]
+        }
+        assert _is_multimodal_request(data) is False
+
+    def test_multiple_messages_one_with_image(self):
+        """Test multiple messages where only one has image."""
+        from hooks.billing_callback import _is_multimodal_request
+
+        data = {
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "First question"},
+                {"role": "assistant", "content": "First answer"},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,xyz"}},
+                    ],
+                },
+            ]
+        }
+        assert _is_multimodal_request(data) is True
+
+
+class TestGetVisionCompatibleModel:
+    """Tests for _get_vision_compatible_model helper function."""
+
+    def test_already_compatible_together_ai(self):
+        """Test Together AI model returns None (already compatible)."""
+        from hooks.billing_callback import _get_vision_compatible_model
+
+        result = _get_vision_compatible_model("together_ai/meta-llama/Meta-Llama-3.1-70B")
+        assert result is None
+
+    def test_already_compatible_openrouter(self):
+        """Test OpenRouter model returns None (already compatible)."""
+        from hooks.billing_callback import _get_vision_compatible_model
+
+        result = _get_vision_compatible_model("openrouter/meta-llama/llama-3.1-70b")
+        assert result is None
+
+    def test_groq_maverick_routes_to_together(self):
+        """Test Groq Maverick model routes to Together AI."""
+        from hooks.billing_callback import _get_vision_compatible_model, VISION_FALLBACK_MODEL
+
+        result = _get_vision_compatible_model("groq/llama-4-maverick-17b")
+        assert result is not None
+        assert "together_ai" in result
+        assert "Maverick" in result
+
+    def test_groq_llama_3_1_70b_routes_to_together(self):
+        """Test Groq Llama 3.1 70B routes to Together AI equivalent."""
+        from hooks.billing_callback import _get_vision_compatible_model
+
+        result = _get_vision_compatible_model("groq/llama-3.1-70b-versatile")
+        assert result is not None
+        assert "together_ai" in result
+        assert "70B" in result
+
+    def test_groq_llama_3_1_8b_routes_to_together(self):
+        """Test Groq Llama 3.1 8B routes to Together AI equivalent."""
+        from hooks.billing_callback import _get_vision_compatible_model
+
+        result = _get_vision_compatible_model("groq/llama-3.1-8b-instant")
+        assert result is not None
+        assert "together_ai" in result
+        assert "8B" in result
+
+    def test_groq_other_model_uses_fallback(self):
+        """Test other Groq models use fallback."""
+        from hooks.billing_callback import _get_vision_compatible_model, VISION_FALLBACK_MODEL
+
+        result = _get_vision_compatible_model("groq/whisper-large")
+        assert result == VISION_FALLBACK_MODEL
+
+    def test_default_model_uses_fallback(self):
+        """Test 'default' model uses fallback for vision."""
+        from hooks.billing_callback import _get_vision_compatible_model, VISION_FALLBACK_MODEL
+
+        result = _get_vision_compatible_model("default")
+        assert result == VISION_FALLBACK_MODEL
+
+    def test_fast_model_uses_fallback(self):
+        """Test 'fast' model uses fallback for vision."""
+        from hooks.billing_callback import _get_vision_compatible_model, VISION_FALLBACK_MODEL
+
+        result = _get_vision_compatible_model("fast")
+        assert result == VISION_FALLBACK_MODEL
+
+    def test_empty_model_uses_fallback(self):
+        """Test empty model uses fallback."""
+        from hooks.billing_callback import _get_vision_compatible_model, VISION_FALLBACK_MODEL
+
+        result = _get_vision_compatible_model("")
+        assert result == VISION_FALLBACK_MODEL
+
+    def test_none_model_uses_fallback(self):
+        """Test None model uses fallback."""
+        from hooks.billing_callback import _get_vision_compatible_model, VISION_FALLBACK_MODEL
+
+        result = _get_vision_compatible_model(None)
+        assert result == VISION_FALLBACK_MODEL
+
+    def test_unknown_model_assumes_compatible(self):
+        """Test unknown model without groq assumes compatible."""
+        from hooks.billing_callback import _get_vision_compatible_model
+
+        result = _get_vision_compatible_model("anthropic/claude-3-opus")
+        assert result is None  # Assumes compatible
+
+    def test_case_insensitive_groq_detection(self):
+        """Test Groq detection is case insensitive."""
+        from hooks.billing_callback import _get_vision_compatible_model
+
+        result = _get_vision_compatible_model("GROQ/LLAMA-3.1-70B")
+        assert result is not None
+        assert "together_ai" in result
+
+    def test_llama_4_detection(self):
+        """Test Llama 4 model detection for routing."""
+        from hooks.billing_callback import _get_vision_compatible_model
+
+        result = _get_vision_compatible_model("groq/llama-4-scout-8b")
+        assert result is not None
+        assert "Maverick" in result  # Routes to Maverick fallback

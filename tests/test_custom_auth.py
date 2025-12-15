@@ -1,11 +1,17 @@
 """
-Unit tests for custom_auth helper functions.
+Unit tests for custom_auth helper functions and main auth functions.
+
+Uses LiteLLM testing patterns:
+- AsyncMock for async dependency mocking
+- patch for isolating Google auth
+- parametrize for multiple auth scenarios
 """
 
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, AsyncMock
 
 import pytest
+from hypothesis import given, strategies as st, settings
 
 # Mock the litellm imports before importing custom_auth
 import sys
@@ -32,6 +38,13 @@ class MockProxyException(Exception):
         super().__init__(message)
 
 
+class MockRequest:
+    """Mock FastAPI Request for testing."""
+
+    def __init__(self):
+        self.headers = {}
+
+
 mock_litellm_types.UserAPIKeyAuth = MockUserAPIKeyAuth
 mock_litellm_proxy.ProxyException = MockProxyException
 
@@ -49,9 +62,14 @@ from hooks.custom_auth import (
     _extract_user_id,
     _cache_token,
     _handle_verification_error,
+    _get_cached_idinfo,
+    _try_import_google_auth_silent,
+    _try_decode_expired_token_silent,
     _token_cache,
     _CACHE_DURATION_SECONDS,
     GOOGLE_CLIENT_IDS,
+    user_api_key_auth,
+    verify_google_token,
 )
 
 
@@ -370,3 +388,347 @@ class TestHandleVerificationError:
         assert "Invalid authentication token" in exc_info.value.message
         # Should not leak internal error details
         assert "secret" not in exc_info.value.message
+
+
+# =============================================================================
+# Tests for verify_google_token helper functions
+# =============================================================================
+
+
+class TestGetCachedIdinfo:
+    """Tests for _get_cached_idinfo function."""
+
+    def setup_method(self):
+        """Clear cache before each test."""
+        _token_cache.clear()
+
+    def test_returns_none_for_uncached_token(self):
+        """Test returns None for tokens not in cache."""
+        result = _get_cached_idinfo("uncached-token")
+        assert result is None
+
+    def test_returns_idinfo_for_valid_cached_token(self):
+        """Test returns idinfo dict for valid cached tokens."""
+        _token_cache["valid-token"] = ("user123", time.time() + 3600)
+
+        result = _get_cached_idinfo("valid-token")
+
+        assert result is not None
+        assert result["sub"] == "user123"
+
+    def test_removes_and_returns_none_for_expired_token(self):
+        """Test removes expired tokens and returns None."""
+        _token_cache["expired-token"] = ("user456", time.time() - 100)
+
+        result = _get_cached_idinfo("expired-token")
+
+        assert result is None
+        assert "expired-token" not in _token_cache
+
+
+class TestTryImportGoogleAuthSilent:
+    """Tests for _try_import_google_auth_silent function."""
+
+    def test_returns_none_when_import_fails(self):
+        """Test returns None when google-auth not installed."""
+        with patch.dict(sys.modules, {"google.oauth2": None, "google.auth.transport": None}):
+            original_import = __builtins__.__import__ if hasattr(__builtins__, '__import__') else __import__
+
+            def mock_import(name, *args, **kwargs):
+                if "google" in name:
+                    raise ImportError("No module named 'google'")
+                return original_import(name, *args, **kwargs)
+
+            with patch("builtins.__import__", side_effect=mock_import):
+                result = _try_import_google_auth_silent()
+
+            # Result should be None (not raise exception)
+            assert result is None
+
+
+class TestTryDecodeExpiredTokenSilent:
+    """Tests for _try_decode_expired_token_silent function."""
+
+    def test_returns_none_for_non_expired_error(self):
+        """Test returns None when error is not expiration."""
+        mock_jwt = MagicMock()
+        result = _try_decode_expired_token_silent(
+            "token",
+            mock_jwt,
+            Exception("Invalid signature")
+        )
+        assert result is None
+        mock_jwt.decode.assert_not_called()
+
+    def test_returns_none_when_no_error(self):
+        """Test returns None when last_error is None."""
+        mock_jwt = MagicMock()
+        result = _try_decode_expired_token_silent("token", mock_jwt, None)
+        assert result is None
+
+    def test_decodes_expired_token_with_valid_claims(self):
+        """Test decodes expired token when claims are valid."""
+        mock_jwt = MagicMock()
+        mock_jwt.decode.return_value = {
+            "aud": GOOGLE_CLIENT_IDS[0],
+            "iss": "accounts.google.com",
+            "sub": "user123",
+        }
+
+        result = _try_decode_expired_token_silent(
+            "expired-token",
+            mock_jwt,
+            Exception("Token has expired")
+        )
+
+        assert result is not None
+        assert result["sub"] == "user123"
+
+    def test_returns_none_for_invalid_audience(self):
+        """Test returns None when audience is invalid."""
+        mock_jwt = MagicMock()
+        mock_jwt.decode.return_value = {
+            "aud": "wrong-client-id",
+            "iss": "accounts.google.com",
+            "sub": "user123",
+        }
+
+        result = _try_decode_expired_token_silent(
+            "expired-token",
+            mock_jwt,
+            Exception("Token has expired")
+        )
+
+        assert result is None
+
+    def test_returns_none_on_decode_error(self):
+        """Test returns None when decode fails."""
+        mock_jwt = MagicMock()
+        mock_jwt.decode.side_effect = Exception("Malformed token")
+
+        result = _try_decode_expired_token_silent(
+            "bad-token",
+            mock_jwt,
+            Exception("Token has expired")
+        )
+
+        assert result is None
+
+
+# =============================================================================
+# Tests for user_api_key_auth main function
+# =============================================================================
+
+
+class TestUserApiKeyAuth:
+    """Tests for user_api_key_auth async function."""
+
+    def setup_method(self):
+        """Clear cache before each test."""
+        _token_cache.clear()
+
+    @pytest.mark.asyncio
+    async def test_raises_on_missing_api_key(self):
+        """Test raises ProxyException when api_key is empty."""
+        request = MockRequest()
+
+        with pytest.raises(MockProxyException) as exc_info:
+            await user_api_key_auth(request, "")
+
+        assert exc_info.value.code == 401
+        assert "Missing" in exc_info.value.message
+
+    @pytest.mark.asyncio
+    async def test_returns_cached_auth(self):
+        """Test returns cached auth without verification."""
+        request = MockRequest()
+        _token_cache["cached-token"] = ("user123", time.time() + 3600)
+
+        result = await user_api_key_auth(request, "cached-token")
+
+        assert result.api_key == "google:user123"
+        assert result.user_id == "user123"
+
+    @pytest.mark.asyncio
+    async def test_successful_verification(self):
+        """Test successful token verification flow."""
+        request = MockRequest()
+
+        mock_id_token = MagicMock()
+        mock_id_token.verify_oauth2_token.return_value = {
+            "sub": "user456",
+            "aud": GOOGLE_CLIENT_IDS[0],
+        }
+        mock_requests = MagicMock()
+        mock_jwt = MagicMock()
+
+        with patch("hooks.custom_auth._import_google_auth") as mock_import:
+            mock_import.return_value = (mock_id_token, mock_requests, mock_jwt)
+
+            result = await user_api_key_auth(request, "valid-token")
+
+        assert result.api_key == "google:user456"
+        assert result.user_id == "user456"
+        # Token should be cached
+        assert "valid-token" in _token_cache
+
+    @pytest.mark.asyncio
+    async def test_handles_expired_token(self):
+        """Test handles expired token by decoding without verification."""
+        request = MockRequest()
+
+        mock_id_token = MagicMock()
+        mock_id_token.verify_oauth2_token.side_effect = Exception("Token has expired")
+        mock_requests = MagicMock()
+        mock_jwt = MagicMock()
+        mock_jwt.decode.return_value = {
+            "sub": "user789",
+            "aud": GOOGLE_CLIENT_IDS[0],
+            "iss": "accounts.google.com",
+        }
+
+        with patch("hooks.custom_auth._import_google_auth") as mock_import:
+            mock_import.return_value = (mock_id_token, mock_requests, mock_jwt)
+
+            result = await user_api_key_auth(request, "expired-token")
+
+        assert result.api_key == "google:user789"
+        assert result.user_id == "user789"
+
+    @pytest.mark.asyncio
+    async def test_raises_on_verification_failure(self):
+        """Test raises ProxyException on verification failure."""
+        request = MockRequest()
+
+        mock_id_token = MagicMock()
+        mock_id_token.verify_oauth2_token.side_effect = Exception("Invalid signature")
+        mock_requests = MagicMock()
+        mock_jwt = MagicMock()
+
+        with patch("hooks.custom_auth._import_google_auth") as mock_import:
+            mock_import.return_value = (mock_id_token, mock_requests, mock_jwt)
+
+            with pytest.raises(MockProxyException) as exc_info:
+                await user_api_key_auth(request, "invalid-token")
+
+        assert exc_info.value.code == 401
+
+
+# =============================================================================
+# Tests for verify_google_token main function
+# =============================================================================
+
+
+class TestVerifyGoogleToken:
+    """Tests for verify_google_token async function."""
+
+    def setup_method(self):
+        """Clear cache before each test."""
+        _token_cache.clear()
+
+    @pytest.mark.asyncio
+    async def test_returns_none_for_empty_token(self):
+        """Test returns None for empty token."""
+        result = await verify_google_token("")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_for_none_token(self):
+        """Test returns None for None token."""
+        result = await verify_google_token(None)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_cached_idinfo(self):
+        """Test returns cached idinfo."""
+        _token_cache["cached-token"] = ("user123", time.time() + 3600)
+
+        result = await verify_google_token("cached-token")
+
+        assert result is not None
+        assert result["sub"] == "user123"
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_google_auth_not_installed(self):
+        """Test returns None when google-auth not available."""
+        with patch("hooks.custom_auth._try_import_google_auth_silent", return_value=None):
+            result = await verify_google_token("some-token")
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_successful_verification(self):
+        """Test successful token verification."""
+        mock_id_token = MagicMock()
+        mock_id_token.verify_oauth2_token.return_value = {
+            "sub": "user456",
+            "aud": GOOGLE_CLIENT_IDS[0],
+            "email": "user@example.com",
+        }
+        mock_requests = MagicMock()
+        mock_jwt = MagicMock()
+
+        with patch("hooks.custom_auth._try_import_google_auth_silent") as mock_import:
+            mock_import.return_value = (mock_id_token, mock_requests, mock_jwt)
+
+            result = await verify_google_token("valid-token")
+
+        assert result is not None
+        assert result["sub"] == "user456"
+        assert result["email"] == "user@example.com"
+        # Should be cached
+        assert "valid-token" in _token_cache
+
+    @pytest.mark.asyncio
+    async def test_handles_expired_token(self):
+        """Test handles expired token gracefully."""
+        mock_id_token = MagicMock()
+        mock_id_token.verify_oauth2_token.side_effect = Exception("Token has expired")
+        mock_requests = MagicMock()
+        mock_jwt = MagicMock()
+        mock_jwt.decode.return_value = {
+            "sub": "user789",
+            "aud": GOOGLE_CLIENT_IDS[0],
+            "iss": "accounts.google.com",
+        }
+
+        with patch("hooks.custom_auth._try_import_google_auth_silent") as mock_import:
+            mock_import.return_value = (mock_id_token, mock_requests, mock_jwt)
+
+            result = await verify_google_token("expired-token")
+
+        assert result is not None
+        assert result["sub"] == "user789"
+
+    @pytest.mark.asyncio
+    async def test_returns_none_on_verification_failure(self):
+        """Test returns None on verification failure (no exception)."""
+        mock_id_token = MagicMock()
+        mock_id_token.verify_oauth2_token.side_effect = Exception("Invalid signature")
+        mock_requests = MagicMock()
+        mock_jwt = MagicMock()
+
+        with patch("hooks.custom_auth._try_import_google_auth_silent") as mock_import:
+            mock_import.return_value = (mock_id_token, mock_requests, mock_jwt)
+
+            result = await verify_google_token("invalid-token")
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_no_user_id(self):
+        """Test returns None when token has no sub claim."""
+        mock_id_token = MagicMock()
+        mock_id_token.verify_oauth2_token.return_value = {
+            "aud": GOOGLE_CLIENT_IDS[0],
+            # Missing "sub"
+        }
+        mock_requests = MagicMock()
+        mock_jwt = MagicMock()
+
+        with patch("hooks.custom_auth._try_import_google_auth_silent") as mock_import:
+            mock_import.return_value = (mock_id_token, mock_requests, mock_jwt)
+
+            result = await verify_google_token("no-sub-token")
+
+        assert result is None
