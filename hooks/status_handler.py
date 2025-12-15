@@ -80,6 +80,59 @@ PROVIDERS = {
 }
 
 
+def _init_provider_result(provider_id: str, config: dict) -> dict[str, Any]:
+    """Initialize a provider status result with default values."""
+    return {
+        "provider": provider_id,
+        "name": config["name"],
+        "type": config["type"],
+        "status": STATUS_OUTAGE,
+        "latency_ms": None,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "error": None,
+    }
+
+
+def _get_api_key(config: dict) -> str | None:
+    """Get API key from environment, or None if not configured."""
+    api_key = os.environ.get(config["env_key"], "")
+    return api_key if api_key else None
+
+
+def _build_check_url(config: dict) -> str | None:
+    """Build the check URL from config. Returns None if URL cannot be built."""
+    if config.get("env_url"):
+        base_url = os.environ.get(config["env_url"], "")
+        if not base_url:
+            return None
+        return f"{base_url.rstrip('/')}{config.get('check_path', '/health')}"
+    return config["check_url"]
+
+
+def _build_auth_headers(config: dict, api_key: str) -> dict[str, str]:
+    """Build authentication headers from config."""
+    headers = {}
+    if config.get("auth_header"):
+        headers[config["auth_header"]] = f"{config.get('auth_prefix', '')}{api_key}"
+    return headers
+
+
+def _evaluate_response(result: dict, latency_ms: int, status_code: int) -> None:
+    """Evaluate response and update result status."""
+    result["latency_ms"] = latency_ms
+    if status_code < 400:
+        if latency_ms < LATENCY_GOOD:
+            result["status"] = STATUS_OPERATIONAL
+        elif latency_ms < LATENCY_DEGRADED:
+            result["status"] = STATUS_DEGRADED
+        else:
+            result["status"] = STATUS_DEGRADED
+            result["error"] = f"High latency: {latency_ms}ms"
+    else:
+        result["status"] = STATUS_OUTAGE
+        result["error"] = f"HTTP {status_code}"
+
+
 async def check_provider(
     client: httpx.AsyncClient,
     provider_id: str,
@@ -99,75 +152,41 @@ async def check_provider(
             "error": null
         }
     """
-    result = {
-        "provider": provider_id,
-        "name": config["name"],
-        "type": config["type"],
-        "status": STATUS_OUTAGE,
-        "latency_ms": None,
-        "checked_at": datetime.now(timezone.utc).isoformat(),
-        "error": None,
-    }
+    result = _init_provider_result(provider_id, config)
 
-    # Get API key
-    api_key = os.environ.get(config["env_key"], "")
+    # Validate configuration
+    api_key = _get_api_key(config)
     if not api_key:
         result["error"] = "API key not configured"
         return result
 
-    # Build check URL
-    if config.get("env_url"):
-        base_url = os.environ.get(config["env_url"], "")
-        if not base_url:
-            result["error"] = "URL not configured"
-            return result
-        check_url = f"{base_url.rstrip('/')}{config.get('check_path', '/health')}"
-    else:
-        check_url = config["check_url"]
+    check_url = _build_check_url(config)
+    if not check_url:
+        result["error"] = "URL not configured"
+        return result
 
-    # Build headers
-    headers = {}
-    if config.get("auth_header"):
-        headers[config["auth_header"]] = f"{config.get('auth_prefix', '')}{api_key}"
+    headers = _build_auth_headers(config, api_key)
 
-    # Make request
+    # Make request and evaluate response
     start_time = time.monotonic()
     try:
-        if config.get("check_params"):
-            resp = await client.get(
-                check_url,
-                params=config["check_params"],
-                headers=headers,
-                timeout=10.0,
-            )
-        else:
-            resp = await client.get(check_url, headers=headers, timeout=10.0)
-
+        resp = await client.get(
+            check_url,
+            params=config.get("check_params"),
+            headers=headers,
+            timeout=10.0,
+        )
         latency_ms = int((time.monotonic() - start_time) * 1000)
-        result["latency_ms"] = latency_ms
-
-        if resp.status_code < 400:
-            if latency_ms < LATENCY_GOOD:
-                result["status"] = STATUS_OPERATIONAL
-            elif latency_ms < LATENCY_DEGRADED:
-                result["status"] = STATUS_DEGRADED
-            else:
-                result["status"] = STATUS_DEGRADED
-                result["error"] = f"High latency: {latency_ms}ms"
-        else:
-            result["status"] = STATUS_OUTAGE
-            result["error"] = f"HTTP {resp.status_code}"
+        _evaluate_response(result, latency_ms, resp.status_code)
 
     except httpx.TimeoutException:
         result["latency_ms"] = int((time.monotonic() - start_time) * 1000)
         result["error"] = "Timeout"
     except httpx.RequestError as e:
         result["latency_ms"] = int((time.monotonic() - start_time) * 1000)
-        # Only expose error type, not full message (may contain sensitive data)
         result["error"] = f"Connection error: {type(e).__name__}"
     except Exception:
         result["latency_ms"] = int((time.monotonic() - start_time) * 1000)
-        # Never expose raw exception messages - may contain API keys or internal details
         result["error"] = "Internal error"
 
     return result
