@@ -62,19 +62,18 @@ def main():
     """
     Main entry point - initializes LiteLLM with config and adds custom routes.
 
-    IMPORTANT: Must call ProxyStartupEvent to load config (including custom_auth).
+    IMPORTANT: Must call initialize() to load config (including custom_auth).
     Simply importing the app doesn't load the config file.
     """
     config_path = os.environ.get("LITELLM_CONFIG_PATH", "/app/config.yaml")
 
     # Import LiteLLM components
-    from litellm.proxy.proxy_server import app, ProxyStartupEvent
+    from litellm.proxy.proxy_server import app, initialize
 
     # Initialize LiteLLM with config - this loads custom_auth, callbacks, etc.
     print(f"[CIRISProxy] Loading config from {config_path}")
-    startup_event = ProxyStartupEvent()
     asyncio.get_event_loop().run_until_complete(
-        startup_event.initialize(config_path=config_path)
+        initialize(config=config_path)
     )
     print("[CIRISProxy] LiteLLM initialized with config")
 
