@@ -34,6 +34,31 @@ from typing import Any
 import httpx
 from litellm.integrations.custom_logger import CustomLogger
 
+
+# Custom exceptions for billing errors
+class BillingError(Exception):
+    """Base exception for billing-related errors."""
+
+
+class InvalidAPIKeyError(BillingError):
+    """Raised when API key format is invalid."""
+
+
+class MissingInteractionIdError(BillingError):
+    """Raised when interaction_id is missing from request."""
+
+
+class InsufficientCreditsError(BillingError):
+    """Raised when user has no credits available."""
+
+
+class BillingServiceError(BillingError):
+    """Raised when billing service returns an error."""
+
+
+class BillingServiceUnavailableError(BillingError):
+    """Raised when billing service is unreachable."""
+
 # Add sdk to path for logshipper import
 # In production: /app/billing_callback.py needs /app in path to find /app/sdk/
 # In local: hooks/billing_callback.py needs parent dir to find sdk/
@@ -101,6 +126,9 @@ else:
 # Interaction limits - exceeding these triggers a new charge
 MAX_INTERACTION_AGE_SECONDS = 300  # 5 minutes - interaction reused after this is a new task
 MAX_LLM_CALLS_PER_INTERACTION = 80  # Exceeding this triggers a new charge
+
+# OAuth provider constant
+DEFAULT_OAUTH_PROVIDER = "oauth:google"
 
 # Vision/multimodal routing configuration
 # Groq doesn't support system messages + images, so route multimodal to these providers
@@ -296,16 +324,16 @@ class CIRISBillingCallback(CustomLogger):
         Returns: (oauth_provider, external_id)
         """
         if not api_key:
-            return "oauth:google", ""
+            return DEFAULT_OAUTH_PROVIDER, ""
 
         if api_key.startswith("google:"):
-            return "oauth:google", api_key[7:]  # len("google:") = 7
+            return DEFAULT_OAUTH_PROVIDER, api_key[7:]  # len("google:") = 7
         elif ":" in api_key:
             provider, user_id = api_key.split(":", 1)
             return f"oauth:{provider}", user_id
         else:
             # Assume it's just the user ID with Google OAuth
-            return "oauth:google", api_key
+            return DEFAULT_OAUTH_PROVIDER, api_key
 
     async def _log_interaction_usage(self, interaction_id: str) -> None:
         """
@@ -335,7 +363,7 @@ class CIRISBillingCallback(CustomLogger):
             resp = await client.post(
                 f"{self.billing_url}/v1/billing/litellm/usage",
                 json={
-                    "oauth_provider": "oauth:google",
+                    "oauth_provider": DEFAULT_OAUTH_PROVIDER,
                     "external_id": external_id,
                     "interaction_id": interaction_id,
                     "total_llm_calls": usage_data.get("llm_calls", 0),
@@ -480,7 +508,7 @@ class CIRISBillingCallback(CustomLogger):
 
         if not external_id:
             logger.warning("Auth denied: missing user identifier in API key")
-            raise Exception("Invalid API key format. Expected: google:{user_id}")
+            raise InvalidAPIKeyError("Invalid API key format. Expected: google:{user_id}")
 
         # Get interaction_id from request metadata (set by on-device agent)
         metadata = data.get("metadata", {})
@@ -488,7 +516,7 @@ class CIRISBillingCallback(CustomLogger):
 
         if not interaction_id:
             logger.warning("Auth denied: missing interaction_id")
-            raise Exception(
+            raise MissingInteractionIdError(
                 "Missing interaction_id in request metadata. "
                 "The on-device agent must set metadata.interaction_id for each interaction."
             )
@@ -568,7 +596,7 @@ class CIRISBillingCallback(CustomLogger):
                     resp.status_code,
                     resp.text[:200],
                 )
-                raise Exception(f"Billing service error: {resp.status_code}")
+                raise BillingServiceError(f"Billing service error: {resp.status_code}")
 
             result = resp.json()
             # New endpoint returns has_credit instead of authorized
@@ -591,13 +619,13 @@ class CIRISBillingCallback(CustomLogger):
                 )
                 _ship_log(
                     "WARNING",
-                    f"Auth denied: no credits available",
+                    "Auth denied: no credits available",
                     event="auth_denied",
                     interaction_id=interaction_id,
                     user_hash=_hash_id(external_id),
                     credits_remaining=total_credits,
                 )
-                raise Exception(f"Insufficient credits: {total_credits} available")
+                raise InsufficientCreditsError(f"Insufficient credits: {total_credits} available")
 
             # Cache authorization for this interaction
             self._authorized_interactions[interaction_id] = True
@@ -632,7 +660,7 @@ class CIRISBillingCallback(CustomLogger):
                 user_hash=_hash_id(external_id),
                 error_type=type(e).__name__,
             )
-            raise Exception("Billing service unavailable. Please try again later.")
+            raise BillingServiceUnavailableError("Billing service unavailable. Please try again later.")
 
     async def async_log_success_event(
         self,
@@ -749,7 +777,7 @@ class CIRISBillingCallback(CustomLogger):
                 )
                 _ship_log(
                     "INFO",
-                    f"Credit charged for interaction",
+                    "Credit charged for interaction",
                     event="charge_created",
                     interaction_id=interaction_id,
                     user_hash=_hash_id(external_id),

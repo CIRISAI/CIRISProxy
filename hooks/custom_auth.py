@@ -16,7 +16,6 @@ billing service handles authorization.
 
 import os
 import time
-from typing import Union
 
 from fastapi import Request
 from litellm.proxy._types import UserAPIKeyAuth
@@ -138,7 +137,7 @@ async def verify_google_token(token: str) -> dict | None:
         return None
 
 
-async def user_api_key_auth(request: Request, api_key: str) -> Union[UserAPIKeyAuth, str]:
+async def user_api_key_auth(request: Request, api_key: str) -> UserAPIKeyAuth | str:
     """
     Verify Google ID token and extract user identity.
 
@@ -228,7 +227,7 @@ async def user_api_key_auth(request: Request, api_key: str) -> Union[UserAPIKeyA
                     aud = idinfo.get("aud")
                     if aud not in GOOGLE_CLIENT_IDS:
                         raise ProxyException(
-                            message=f"Invalid token audience",
+                            message="Invalid token audience",
                             type="auth_error",
                             param="Authorization",
                             code=401,

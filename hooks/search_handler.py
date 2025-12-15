@@ -33,7 +33,7 @@ try:
     from custom_auth import verify_google_token
 except ImportError:
     # Fallback if custom_auth not available
-    async def verify_google_token(token: str) -> dict | None:
+    async def verify_google_token(_token: str) -> dict | None:
         return None
 
 

@@ -31,6 +31,9 @@ STATUS_OUTAGE = "outage"
 LATENCY_GOOD = 1000
 LATENCY_DEGRADED = 3000
 
+# Auth prefix constants
+AUTH_PREFIX_BEARER = "Bearer "
+
 # Provider configurations
 PROVIDERS = {
     "openrouter": {
@@ -39,7 +42,7 @@ PROVIDERS = {
         "check_url": "https://openrouter.ai/api/v1/models",
         "env_key": "OPENROUTER_API_KEY",
         "auth_header": "Authorization",
-        "auth_prefix": "Bearer ",
+        "auth_prefix": AUTH_PREFIX_BEARER,
     },
     "groq": {
         "name": "Groq",
@@ -47,7 +50,7 @@ PROVIDERS = {
         "check_url": "https://api.groq.com/openai/v1/models",
         "env_key": "GROQ_API_KEY",
         "auth_header": "Authorization",
-        "auth_prefix": "Bearer ",
+        "auth_prefix": AUTH_PREFIX_BEARER,
     },
     "together": {
         "name": "Together AI",
@@ -55,7 +58,7 @@ PROVIDERS = {
         "check_url": "https://api.together.xyz/v1/models",
         "env_key": "TOGETHER_API_KEY",
         "auth_header": "Authorization",
-        "auth_prefix": "Bearer ",
+        "auth_prefix": AUTH_PREFIX_BEARER,
     },
     "billing": {
         "name": "CIRISBilling",

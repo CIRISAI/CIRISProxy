@@ -44,6 +44,9 @@ from urllib.error import URLError, HTTPError
 
 __version__ = "1.0.0"
 
+# Default CIRISLens endpoint
+DEFAULT_CIRISLENS_ENDPOINT = "https://agents.ciris.ai/lens/api/v1/logs/ingest"
+
 
 class LogShipper:
     """
@@ -57,7 +60,7 @@ class LogShipper:
         self,
         service_name: str,
         token: str,
-        endpoint: str = "https://agents.ciris.ai/lens/api/v1/logs/ingest",
+        endpoint: str = DEFAULT_CIRISLENS_ENDPOINT,
         batch_size: int = 100,
         flush_interval: float = 5.0,
         server_id: Optional[str] = None,
@@ -333,7 +336,7 @@ class LogShipperHandler(logging.Handler):
 def setup_logging(
     service_name: str,
     token: str,
-    endpoint: str = "https://agents.ciris.ai/lens/api/v1/logs/ingest",
+    endpoint: str = DEFAULT_CIRISLENS_ENDPOINT,
     min_level: int = logging.INFO,
     also_console: bool = True,
     **shipper_kwargs,
@@ -419,7 +422,7 @@ def from_env(service_name: Optional[str] = None) -> LogShipper:
     token = os.environ.get("CIRISLENS_TOKEN")
     endpoint = os.environ.get(
         "CIRISLENS_ENDPOINT",
-        "https://agents.ciris.ai/lens/api/v1/logs/ingest"
+        DEFAULT_CIRISLENS_ENDPOINT
     )
 
     if not name:
