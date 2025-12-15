@@ -27,6 +27,7 @@ CIRISProxy is **temporary bridging infrastructure** that enables CIRIS ethical a
 | **Credit Gating** | Users authenticate via Google OAuth; credits enforced per-interaction |
 | **Per-Interaction Billing** | 1 credit = 1 user interaction (12-70 LLM calls typical) |
 | **Vision Routing** | Automatic rerouting of multimodal requests to compatible providers |
+| **ZDR Web Search** | Exa AI primary (Zero Data Retention), Brave fallback |
 | **Observability** | Structured logging to CIRISLens for audit trails |
 
 ### Safety & Privacy
@@ -71,10 +72,15 @@ curl -X POST http://localhost:4000/v1/chat/completions \
 | `GROQ_API_KEY` | Yes | Groq API key |
 | `TOGETHER_API_KEY` | Yes | Together AI API key |
 | `OPENROUTER_API_KEY` | No | OpenRouter API key (fallback) |
+| `EXA_API_KEY` | Yes* | Exa AI API key (ZDR-compliant search) |
+| `BRAVE_API_KEY` | No | Brave Search API key (fallback) |
+| `SEARCH_PROVIDER` | No | `auto` (default), `exa`, or `brave` |
 | `BILLING_API_URL` | Yes | CIRISBilling endpoint |
 | `BILLING_API_KEY` | Yes | Service-to-service auth key |
 | `GOOGLE_CLIENT_ID` | Yes | Google OAuth client ID for token verification |
 | `CIRISLENS_TOKEN` | No | Token for log shipping to CIRISLens |
+
+*Either `EXA_API_KEY` or `BRAVE_API_KEY` required for web search functionality.
 
 ## API Endpoints
 

@@ -19,6 +19,8 @@ from hooks.search_handler import (
     SearchHandler,
     handle_search_request,
     BRAVE_API_URL,
+    EXA_API_URL,
+    _get_active_provider,
 )
 
 
@@ -399,3 +401,354 @@ class TestSearchHandlerClose:
         """Test close handles case where client was never created."""
         handler = SearchHandler()
         await handler.close()  # Should not raise
+
+
+# =============================================================================
+# Provider Selection Tests
+# =============================================================================
+
+
+class TestGetActiveProvider:
+    """Tests for _get_active_provider function."""
+
+    def test_returns_exa_when_exa_key_set_and_auto(self):
+        """Test returns 'exa' when EXA_API_KEY is set in auto mode."""
+        import hooks.search_handler as sh
+        original_exa = sh.EXA_API_KEY
+        original_brave = sh.BRAVE_API_KEY
+        original_provider = sh.SEARCH_PROVIDER
+
+        try:
+            sh.EXA_API_KEY = "exa_key"
+            sh.BRAVE_API_KEY = "brave_key"
+            sh.SEARCH_PROVIDER = "auto"
+
+            assert _get_active_provider() == "exa"
+        finally:
+            sh.EXA_API_KEY = original_exa
+            sh.BRAVE_API_KEY = original_brave
+            sh.SEARCH_PROVIDER = original_provider
+
+    def test_returns_brave_when_only_brave_key_set(self):
+        """Test returns 'brave' when only BRAVE_API_KEY is set."""
+        import hooks.search_handler as sh
+        original_exa = sh.EXA_API_KEY
+        original_brave = sh.BRAVE_API_KEY
+        original_provider = sh.SEARCH_PROVIDER
+
+        try:
+            sh.EXA_API_KEY = ""
+            sh.BRAVE_API_KEY = "brave_key"
+            sh.SEARCH_PROVIDER = "auto"
+
+            assert _get_active_provider() == "brave"
+        finally:
+            sh.EXA_API_KEY = original_exa
+            sh.BRAVE_API_KEY = original_brave
+            sh.SEARCH_PROVIDER = original_provider
+
+    def test_returns_none_when_no_keys(self):
+        """Test returns 'none' when no API keys configured."""
+        import hooks.search_handler as sh
+        original_exa = sh.EXA_API_KEY
+        original_brave = sh.BRAVE_API_KEY
+        original_provider = sh.SEARCH_PROVIDER
+
+        try:
+            sh.EXA_API_KEY = ""
+            sh.BRAVE_API_KEY = ""
+            sh.SEARCH_PROVIDER = "auto"
+
+            assert _get_active_provider() == "none"
+        finally:
+            sh.EXA_API_KEY = original_exa
+            sh.BRAVE_API_KEY = original_brave
+            sh.SEARCH_PROVIDER = original_provider
+
+    def test_explicit_brave_selection(self):
+        """Test explicit 'brave' provider selection."""
+        import hooks.search_handler as sh
+        original_exa = sh.EXA_API_KEY
+        original_brave = sh.BRAVE_API_KEY
+        original_provider = sh.SEARCH_PROVIDER
+
+        try:
+            sh.EXA_API_KEY = "exa_key"
+            sh.BRAVE_API_KEY = "brave_key"
+            sh.SEARCH_PROVIDER = "brave"
+
+            assert _get_active_provider() == "brave"
+        finally:
+            sh.EXA_API_KEY = original_exa
+            sh.BRAVE_API_KEY = original_brave
+            sh.SEARCH_PROVIDER = original_provider
+
+    def test_explicit_exa_selection(self):
+        """Test explicit 'exa' provider selection."""
+        import hooks.search_handler as sh
+        original_exa = sh.EXA_API_KEY
+        original_brave = sh.BRAVE_API_KEY
+        original_provider = sh.SEARCH_PROVIDER
+
+        try:
+            sh.EXA_API_KEY = "exa_key"
+            sh.BRAVE_API_KEY = "brave_key"
+            sh.SEARCH_PROVIDER = "exa"
+
+            assert _get_active_provider() == "exa"
+        finally:
+            sh.EXA_API_KEY = original_exa
+            sh.BRAVE_API_KEY = original_brave
+            sh.SEARCH_PROVIDER = original_provider
+
+
+# =============================================================================
+# Exa Search Tests
+# =============================================================================
+
+
+class TestCallExaSearch:
+    """Tests for _call_exa_search method."""
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_successful_exa_search(self):
+        """Test successful Exa search."""
+        import hooks.search_handler as sh
+        original_key = sh.EXA_API_KEY
+        sh.EXA_API_KEY = "exa_test_key"
+
+        try:
+            respx.post(EXA_API_URL).mock(
+                return_value=httpx.Response(200, json={
+                    "requestId": "req-123",
+                    "resolvedSearchType": "neural",
+                    "results": [
+                        {
+                            "title": "Test Result",
+                            "url": "https://example.com",
+                            "text": "This is test content",
+                            "publishedDate": "2025-01-01",
+                            "author": "Test Author",
+                            "highlights": ["highlight 1"],
+                        }
+                    ]
+                })
+            )
+
+            handler = SearchHandler()
+            results, error = await handler._call_exa_search("test query")
+
+            assert results is not None
+            assert error is None
+            assert results["provider"] == "exa"
+            assert results["web"]["results"][0]["title"] == "Test Result"
+        finally:
+            sh.EXA_API_KEY = original_key
+
+    @pytest.mark.asyncio
+    async def test_exa_missing_api_key(self):
+        """Test returns error when Exa API key not configured."""
+        import hooks.search_handler as sh
+        original_key = sh.EXA_API_KEY
+        sh.EXA_API_KEY = ""
+
+        try:
+            handler = SearchHandler()
+            results, error = await handler._call_exa_search("test query")
+
+            assert results is None
+            assert "not configured" in error.lower()
+        finally:
+            sh.EXA_API_KEY = original_key
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_exa_error_response(self):
+        """Test handles Exa API error responses."""
+        import hooks.search_handler as sh
+        original_key = sh.EXA_API_KEY
+        sh.EXA_API_KEY = "exa_test_key"
+
+        try:
+            respx.post(EXA_API_URL).mock(
+                return_value=httpx.Response(429)
+            )
+
+            handler = SearchHandler()
+            results, error = await handler._call_exa_search("test query")
+
+            assert results is None
+            assert "429" in error
+        finally:
+            sh.EXA_API_KEY = original_key
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_exa_limits_count_to_100(self):
+        """Test limits count parameter to Exa's maximum of 100."""
+        import hooks.search_handler as sh
+        original_key = sh.EXA_API_KEY
+        sh.EXA_API_KEY = "exa_test_key"
+
+        try:
+            respx.post(EXA_API_URL).mock(
+                return_value=httpx.Response(200, json={
+                    "requestId": "req-123",
+                    "results": []
+                })
+            )
+
+            handler = SearchHandler()
+            await handler._call_exa_search("test", count=150)
+
+            # Check the request was made with numResults=100
+            request_body = respx.calls.last.request.content
+            import json
+            body = json.loads(request_body)
+            assert body["numResults"] == 100
+        finally:
+            sh.EXA_API_KEY = original_key
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_exa_includes_content_request(self):
+        """Test Exa request includes text and highlights content."""
+        import hooks.search_handler as sh
+        original_key = sh.EXA_API_KEY
+        sh.EXA_API_KEY = "exa_test_key"
+
+        try:
+            respx.post(EXA_API_URL).mock(
+                return_value=httpx.Response(200, json={
+                    "requestId": "req-123",
+                    "results": []
+                })
+            )
+
+            handler = SearchHandler()
+            await handler._call_exa_search("test")
+
+            import json
+            body = json.loads(respx.calls.last.request.content)
+            assert "contents" in body
+            assert "text" in body["contents"]
+            assert "highlights" in body["contents"]
+        finally:
+            sh.EXA_API_KEY = original_key
+
+
+class TestNormalizeExaResponse:
+    """Tests for _normalize_exa_response method."""
+
+    def test_normalizes_basic_response(self):
+        """Test normalizes basic Exa response."""
+        handler = SearchHandler()
+        exa_response = {
+            "requestId": "req-123",
+            "resolvedSearchType": "neural",
+            "results": [
+                {
+                    "title": "Test",
+                    "url": "https://example.com",
+                    "text": "Content text",
+                }
+            ]
+        }
+
+        normalized = handler._normalize_exa_response(exa_response)
+
+        assert normalized["provider"] == "exa"
+        assert normalized["request_id"] == "req-123"
+        assert normalized["search_type"] == "neural"
+        assert len(normalized["web"]["results"]) == 1
+        assert normalized["web"]["results"][0]["title"] == "Test"
+
+    def test_truncates_description(self):
+        """Test truncates description to 500 chars."""
+        handler = SearchHandler()
+        long_text = "x" * 1000
+        exa_response = {
+            "results": [{"text": long_text, "title": "T", "url": "http://x"}]
+        }
+
+        normalized = handler._normalize_exa_response(exa_response)
+
+        assert len(normalized["web"]["results"][0]["description"]) == 500
+
+    def test_handles_empty_results(self):
+        """Test handles empty results array."""
+        handler = SearchHandler()
+        exa_response = {"results": [], "requestId": "123"}
+
+        normalized = handler._normalize_exa_response(exa_response)
+
+        assert normalized["web"]["results"] == []
+        assert normalized["provider"] == "exa"
+
+
+# =============================================================================
+# Execute Search with Fallback Tests
+# =============================================================================
+
+
+class TestExecuteSearch:
+    """Tests for _execute_search method with provider fallback."""
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_fallback_to_brave_when_exa_fails(self):
+        """Test falls back to Brave when Exa fails."""
+        import hooks.search_handler as sh
+        original_exa = sh.EXA_API_KEY
+        original_brave = sh.BRAVE_API_KEY
+        original_provider = sh.SEARCH_PROVIDER
+
+        try:
+            sh.EXA_API_KEY = "exa_key"
+            sh.BRAVE_API_KEY = "brave_key"
+            sh.SEARCH_PROVIDER = "auto"
+
+            # Exa fails
+            respx.post(EXA_API_URL).mock(
+                return_value=httpx.Response(500)
+            )
+            # Brave succeeds
+            respx.get(BRAVE_API_URL).mock(
+                return_value=httpx.Response(200, json={
+                    "web": {"results": [{"title": "Brave Result"}]}
+                })
+            )
+
+            handler = SearchHandler()
+            results, error = await handler._execute_search("test query")
+
+            assert results is not None
+            assert results["provider"] == "brave"
+        finally:
+            sh.EXA_API_KEY = original_exa
+            sh.BRAVE_API_KEY = original_brave
+            sh.SEARCH_PROVIDER = original_provider
+
+    @pytest.mark.asyncio
+    async def test_returns_error_when_no_provider(self):
+        """Test returns error when no provider configured."""
+        import hooks.search_handler as sh
+        original_exa = sh.EXA_API_KEY
+        original_brave = sh.BRAVE_API_KEY
+        original_provider = sh.SEARCH_PROVIDER
+
+        try:
+            sh.EXA_API_KEY = ""
+            sh.BRAVE_API_KEY = ""
+            sh.SEARCH_PROVIDER = "auto"
+
+            handler = SearchHandler()
+            results, error = await handler._execute_search("test query")
+
+            assert results is None
+            assert "No search provider configured" in error
+        finally:
+            sh.EXA_API_KEY = original_exa
+            sh.BRAVE_API_KEY = original_brave
+            sh.SEARCH_PROVIDER = original_provider
