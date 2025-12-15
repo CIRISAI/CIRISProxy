@@ -461,126 +461,110 @@ class CIRISBillingCallback(CustomLogger):
                 type(e).__name__,
             )
 
-    async def async_pre_call_hook(
-        self,
-        user_api_key_dict: Any,  # Can be dict or UserAPIKeyAuth Pydantic model
-        cache: Any,
-        data: dict[str, Any],
-        call_type: str,
-    ) -> None:
-        """
-        Pre-request: Verify user has credits (cached per interaction).
-
-        Called before every LLM request. We cache the auth result per
-        interaction_id to avoid hammering the billing API.
-
-        Also handles multimodal routing - Groq doesn't support system messages
-        with images, so we route vision requests to Together AI instead.
-        """
-        # === MULTIMODAL ROUTING ===
-        # Detect vision requests and route to compatible providers
-        if _is_multimodal_request(data):
-            current_model = data.get("model", "")
-            vision_model = _get_vision_compatible_model(current_model)
-            if vision_model:
-                print(
-                    f"[CIRIS VISION] Multimodal detected, rerouting from {current_model} to {vision_model}",
-                    flush=True
-                )
-                data["model"] = vision_model
-                _ship_log(
-                    "INFO",
-                    f"Vision request rerouted to {vision_model}",
-                    event="vision_reroute",
-                    original_model=current_model,
-                    vision_model=vision_model,
-                )
-
-        # Extract user identity from the Authorization header
-        # Handle both dict and UserAPIKeyAuth Pydantic model
-        if hasattr(user_api_key_dict, "api_key"):
-            api_key = user_api_key_dict.api_key or ""
-        elif isinstance(user_api_key_dict, dict):
-            api_key = user_api_key_dict.get("api_key", "")
-        else:
-            api_key = ""
-        oauth_provider, external_id = self._parse_user_key(api_key)
-
-        if not external_id:
-            logger.warning("Auth denied: missing user identifier in API key")
-            raise InvalidAPIKeyError("Invalid API key format. Expected: google:{user_id}")
-
-        # Get interaction_id from request metadata (set by on-device agent)
-        metadata = data.get("metadata", {})
-        interaction_id = metadata.get("interaction_id")
-
-        if not interaction_id:
-            logger.warning("Auth denied: missing interaction_id")
-            raise MissingInteractionIdError(
-                "Missing interaction_id in request metadata. "
-                "The on-device agent must set metadata.interaction_id for each interaction."
-            )
-
-        # Store for post-call hooks
-        if "metadata" not in data:
-            data["metadata"] = {}
-        data["metadata"]["_ciris_oauth_provider"] = oauth_provider
-        data["metadata"]["_ciris_external_id"] = external_id
-
-        # Check if this interaction has exceeded limits and needs a continuation charge
-        original_interaction_id = interaction_id
-        now = datetime.now(timezone.utc)
-
-        if interaction_id in self._interaction_usage:
-            usage_data = self._interaction_usage[interaction_id]
-            start_time = usage_data.get("start_time")
-            llm_calls = usage_data.get("llm_calls", 0)
-
-            # Check for stale interaction (>5 minutes old)
-            if start_time:
-                age_seconds = (now - start_time).total_seconds()
-                if age_seconds > MAX_INTERACTION_AGE_SECONDS:
-                    # Interaction is stale - finalize usage log and generate continuation ID
-                    await self._log_interaction_usage(original_interaction_id)
-                    interaction_id = _generate_continuation_id(original_interaction_id, "stale")
-                    print(f"[CIRIS DEBUG] interaction={original_interaction_id} STALE after {age_seconds:.0f}s, new_id={interaction_id}", flush=True)
-                    # Clear the old auth cache so we re-auth
-                    self._authorized_interactions.pop(original_interaction_id, None)
-
-            # Check for excessive LLM calls (>80 calls)
-            if llm_calls >= MAX_LLM_CALLS_PER_INTERACTION and interaction_id == original_interaction_id:
-                # Too many calls - finalize usage log and generate continuation ID
-                await self._log_interaction_usage(original_interaction_id)
-                interaction_id = _generate_continuation_id(original_interaction_id, f"calls{llm_calls}")
-                print(f"[CIRIS DEBUG] interaction={original_interaction_id} EXCEEDED {llm_calls} calls, new_id={interaction_id}", flush=True)
-                # Clear the old auth cache so we re-auth
-                self._authorized_interactions.pop(original_interaction_id, None)
-
-        # Store the (possibly updated) interaction_id for billing
-        data["metadata"]["_ciris_interaction_id"] = interaction_id
-
-        # Initialize usage tracking for this interaction (or continuation)
-        if interaction_id not in self._interaction_usage:
-            self._interaction_usage[interaction_id]["external_id"] = external_id
-            self._interaction_usage[interaction_id]["start_time"] = now
-            # Track the original ID for reference
-            if interaction_id != original_interaction_id:
-                self._interaction_usage[interaction_id]["original_interaction_id"] = original_interaction_id
-
-        # Check if already authorized for this interaction (cache hit)
-        if interaction_id in self._authorized_interactions:
-            logger.debug("interaction=%s auth=cached", interaction_id)
+    def _handle_multimodal_routing(self, data: dict[str, Any]) -> None:
+        """Handle vision request routing to compatible providers."""
+        if not _is_multimodal_request(data):
             return
 
-        # First LLM call for this interaction - check auth with billing service
-        # TEMP: Using print for debugging since logger.info not showing
-        # Show first 4 and last 4 chars of external_id to help identify user without logging full ID
+        current_model = data.get("model", "")
+        vision_model = _get_vision_compatible_model(current_model)
+        if vision_model:
+            print(
+                f"[CIRIS VISION] Multimodal detected, rerouting from {current_model} to {vision_model}",
+                flush=True
+            )
+            data["model"] = vision_model
+            _ship_log(
+                "INFO",
+                f"Vision request rerouted to {vision_model}",
+                event="vision_reroute",
+                original_model=current_model,
+                vision_model=vision_model,
+            )
+
+    def _extract_api_key(self, user_api_key_dict: Any) -> str:
+        """Extract API key from various input formats."""
+        if hasattr(user_api_key_dict, "api_key"):
+            return user_api_key_dict.api_key or ""
+        elif isinstance(user_api_key_dict, dict):
+            return user_api_key_dict.get("api_key", "")
+        return ""
+
+    async def _check_interaction_limits(
+        self,
+        interaction_id: str,
+        original_interaction_id: str,
+    ) -> str:
+        """
+        Check if interaction has exceeded limits and needs continuation.
+
+        Returns:
+            The interaction_id to use (may be a continuation ID)
+        """
+        if interaction_id not in self._interaction_usage:
+            return interaction_id
+
+        usage_data = self._interaction_usage[interaction_id]
+        start_time = usage_data.get("start_time")
+        llm_calls = usage_data.get("llm_calls", 0)
+        now = datetime.now(timezone.utc)
+
+        # Check for stale interaction (>5 minutes old)
+        if start_time:
+            age_seconds = (now - start_time).total_seconds()
+            if age_seconds > MAX_INTERACTION_AGE_SECONDS:
+                await self._log_interaction_usage(original_interaction_id)
+                new_id = _generate_continuation_id(original_interaction_id, "stale")
+                print(f"[CIRIS DEBUG] interaction={original_interaction_id} STALE after {age_seconds:.0f}s, new_id={new_id}", flush=True)
+                self._authorized_interactions.pop(original_interaction_id, None)
+                return new_id
+
+        # Check for excessive LLM calls (>80 calls)
+        if llm_calls >= MAX_LLM_CALLS_PER_INTERACTION:
+            await self._log_interaction_usage(original_interaction_id)
+            new_id = _generate_continuation_id(original_interaction_id, f"calls{llm_calls}")
+            print(f"[CIRIS DEBUG] interaction={original_interaction_id} EXCEEDED {llm_calls} calls, new_id={new_id}", flush=True)
+            self._authorized_interactions.pop(original_interaction_id, None)
+            return new_id
+
+        return interaction_id
+
+    def _initialize_interaction_tracking(
+        self,
+        interaction_id: str,
+        external_id: str,
+        original_interaction_id: str,
+    ) -> None:
+        """Initialize usage tracking for a new interaction."""
+        if interaction_id in self._interaction_usage:
+            return
+
+        now = datetime.now(timezone.utc)
+        self._interaction_usage[interaction_id]["external_id"] = external_id
+        self._interaction_usage[interaction_id]["start_time"] = now
+        if interaction_id != original_interaction_id:
+            self._interaction_usage[interaction_id]["original_interaction_id"] = original_interaction_id
+
+    async def _check_billing_auth(
+        self,
+        oauth_provider: str,
+        external_id: str,
+        interaction_id: str,
+        model: str,
+    ) -> None:
+        """
+        Check billing authorization for an interaction.
+
+        Raises:
+            InsufficientCreditsError: If user has no credits
+            BillingServiceError: If billing service returns error
+            BillingServiceUnavailableError: If billing service unreachable
+        """
         id_preview = f"{external_id[:4]}...{external_id[-4:]}" if len(external_id) > 8 else external_id
-        print(f"[CIRIS DEBUG] interaction={interaction_id} auth=checking oauth={oauth_provider} external_id_preview={id_preview} external_id_hash={_hash_id(external_id)} model={data.get('model', 'unknown')}", flush=True)
+        print(f"[CIRIS DEBUG] interaction={interaction_id} auth=checking oauth={oauth_provider} external_id_preview={id_preview} external_id_hash={_hash_id(external_id)} model={model}", flush=True)
 
         try:
             client = await self._get_client()
-            # Use new /credits/check endpoint (replaces /litellm/auth)
             resp = await client.post(
                 f"{self.billing_url}/v1/billing/credits/check",
                 json={
@@ -599,24 +583,16 @@ class CIRISBillingCallback(CustomLogger):
                 raise BillingServiceError(f"Billing service error: {resp.status_code}")
 
             result = resp.json()
-            # New endpoint returns has_credit instead of authorized
-            # Credits available = free_uses_remaining + credits_remaining
-            # Use `or 0` to handle None values from API
             has_credit = result.get("has_credit", False)
             free_uses = result.get("free_uses_remaining") or 0
             paid_credits = result.get("credits_remaining") or 0
             daily_free = result.get("daily_free_uses_remaining") or 0
             total_credits = free_uses + paid_credits + daily_free
 
-            # TEMP: Using print for debugging
             print(f"[CIRIS DEBUG] interaction={interaction_id} billing_response has_credit={has_credit} free={free_uses} paid={paid_credits} daily={daily_free} total={total_credits}", flush=True)
 
             if not has_credit:
-                logger.info(
-                    "interaction=%s auth=denied reason=no_credits total=%d",
-                    interaction_id,
-                    total_credits,
-                )
+                logger.info("interaction=%s auth=denied reason=no_credits total=%d", interaction_id, total_credits)
                 _ship_log(
                     "WARNING",
                     "Auth denied: no credits available",
@@ -627,13 +603,9 @@ class CIRISBillingCallback(CustomLogger):
                 )
                 raise InsufficientCreditsError(f"Insufficient credits: {total_credits} available")
 
-            # Cache authorization for this interaction
+            # Success - cache authorization
             self._authorized_interactions[interaction_id] = True
-            logger.info(
-                "interaction=%s auth=granted credits=%d",
-                interaction_id,
-                total_credits,
-            )
+            logger.info("interaction=%s auth=granted credits=%d", interaction_id, total_credits)
             _ship_log(
                 "INFO",
                 f"Auth granted with {total_credits} credits",
@@ -641,7 +613,7 @@ class CIRISBillingCallback(CustomLogger):
                 interaction_id=interaction_id,
                 user_hash=_hash_id(external_id),
                 credits_remaining=total_credits,
-                model=data.get("model", "unknown"),
+                model=model,
             )
 
             # Track new interaction in global stats
@@ -650,7 +622,6 @@ class CIRISBillingCallback(CustomLogger):
                 _global_usage["start_time"] = datetime.now(timezone.utc)
 
         except httpx.RequestError as e:
-            # Network error - fail closed (deny access)
             logger.error("interaction=%s billing=unreachable error_type=%s", interaction_id, type(e).__name__)
             _ship_log(
                 "ERROR",
@@ -661,6 +632,66 @@ class CIRISBillingCallback(CustomLogger):
                 error_type=type(e).__name__,
             )
             raise BillingServiceUnavailableError("Billing service unavailable. Please try again later.")
+
+    async def async_pre_call_hook(
+        self,
+        user_api_key_dict: Any,  # Can be dict or UserAPIKeyAuth Pydantic model
+        cache: Any,
+        data: dict[str, Any],
+        call_type: str,
+    ) -> None:
+        """
+        Pre-request: Verify user has credits (cached per interaction).
+
+        Called before every LLM request. We cache the auth result per
+        interaction_id to avoid hammering the billing API.
+
+        Also handles multimodal routing - Groq doesn't support system messages
+        with images, so we route vision requests to Together AI instead.
+        """
+        # Route vision requests to compatible providers
+        self._handle_multimodal_routing(data)
+
+        # Extract and validate user identity
+        api_key = self._extract_api_key(user_api_key_dict)
+        oauth_provider, external_id = self._parse_user_key(api_key)
+
+        if not external_id:
+            logger.warning("Auth denied: missing user identifier in API key")
+            raise InvalidAPIKeyError("Invalid API key format. Expected: google:{user_id}")
+
+        # Get and validate interaction_id
+        metadata = data.get("metadata", {})
+        interaction_id = metadata.get("interaction_id")
+
+        if not interaction_id:
+            logger.warning("Auth denied: missing interaction_id")
+            raise MissingInteractionIdError(
+                "Missing interaction_id in request metadata. "
+                "The on-device agent must set metadata.interaction_id for each interaction."
+            )
+
+        # Store for post-call hooks
+        if "metadata" not in data:
+            data["metadata"] = {}
+        data["metadata"]["_ciris_oauth_provider"] = oauth_provider
+        data["metadata"]["_ciris_external_id"] = external_id
+
+        # Check limits and get (possibly updated) interaction_id
+        original_interaction_id = interaction_id
+        interaction_id = await self._check_interaction_limits(interaction_id, original_interaction_id)
+        data["metadata"]["_ciris_interaction_id"] = interaction_id
+
+        # Initialize usage tracking
+        self._initialize_interaction_tracking(interaction_id, external_id, original_interaction_id)
+
+        # Check if already authorized (cache hit)
+        if interaction_id in self._authorized_interactions:
+            logger.debug("interaction=%s auth=cached", interaction_id)
+            return
+
+        # First call for this interaction - check billing auth
+        await self._check_billing_auth(oauth_provider, external_id, interaction_id, data.get("model", "unknown"))
 
     def _extract_success_metadata(
         self, kwargs: dict[str, Any]
