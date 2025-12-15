@@ -18,8 +18,9 @@ sys.path.insert(0, "/app")
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-# Import status handler
+# Import handlers
 from status_handler import get_status
+from search_handler import handle_search_request
 
 
 def add_custom_routes(app: FastAPI) -> None:
@@ -56,6 +57,41 @@ def add_custom_routes(app: FastAPI) -> None:
         Useful for basic health checks that don't need provider details.
         """
         return JSONResponse(content={"status": "ok", "service": "cirisproxy"})
+
+    @app.post("/v1/search")
+    async def search_endpoint(request: Request):
+        """
+        Web search endpoint with billing integration.
+
+        Requires:
+        - Authorization: Bearer <google_id_token>
+        - Body: {"q": "search query", "count": 10}
+
+        Charges 1 web_search credit per request via CIRISBilling.
+        """
+        # Get auth token
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return JSONResponse(
+                content={"error": "Missing or invalid Authorization header"},
+                status_code=401,
+            )
+        token = auth_header[7:]  # Strip "Bearer "
+
+        # Get request body
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(
+                content={"error": "Invalid JSON body"},
+                status_code=400,
+            )
+
+        # Handle search
+        result = await handle_search_request(body, token)
+        status_code = result.pop("status_code", 200)
+
+        return JSONResponse(content=result, status_code=status_code)
 
 
 def main():
