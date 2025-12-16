@@ -987,13 +987,36 @@ class CIRISBillingCallback(CustomLogger):
             # Extract exception details for debugging
             exception = kwargs.get("exception", None)
             error_msg = str(exception)[:200] if exception else "Unknown error"
+
+            # Extract provider info for debugging which backend failed
+            requested_model = kwargs.get("model", "unknown")
+            actual_model = litellm_params.get("model", requested_model)
+            api_base = litellm_params.get("api_base", "")
+
+            # Determine provider from actual_model prefix
+            provider = "unknown"
+            if actual_model:
+                if actual_model.startswith("groq/"):
+                    provider = "groq"
+                elif actual_model.startswith("together_ai/"):
+                    provider = "together"
+                elif actual_model.startswith("openrouter/"):
+                    provider = "openrouter"
+                elif actual_model.startswith("gpt-"):
+                    provider = "openai"
+                elif "/" in actual_model:
+                    provider = actual_model.split("/")[0]
+
             _ship_log(
                 "ERROR",
                 f"LLM call failed: {error_msg}",
                 event="llm_error",
                 interaction_id=interaction_id,
                 user_hash=_hash_id(external_id) if external_id else None,
-                model=kwargs.get("model", "unknown"),
+                model=requested_model,
+                actual_model=actual_model,
+                provider=provider,
+                api_base=api_base[:50] if api_base else "",
                 error=error_msg,
             )
 
