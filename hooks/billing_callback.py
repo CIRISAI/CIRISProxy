@@ -59,17 +59,8 @@ class BillingServiceError(BillingError):
 class BillingServiceUnavailableError(BillingError):
     """Raised when billing service is unreachable."""
 
-# Add sdk to path for logshipper import
-# In production: /app/billing_callback.py needs /app in path to find /app/sdk/
-# In local: hooks/billing_callback.py needs parent dir to find sdk/
-_this_dir = os.path.dirname(os.path.abspath(__file__))
-_parent_dir = os.path.dirname(_this_dir)
-# If file is directly in /app, add /app. If in hooks/, add parent.
-if os.path.basename(_this_dir) == "hooks":
-    sys.path.insert(0, _parent_dir)
-else:
-    sys.path.insert(0, _this_dir)
-from sdk.logshipper import LogShipper
+# Import LogShipper from CIRISLens SDK submodule
+from libs.cirislens.sdk import LogShipper
 
 # Configure logging to both stdout and file
 LOG_FILE = os.environ.get("CIRIS_LOG_FILE", "/app/logs/cirisproxy.log")

@@ -1,5 +1,5 @@
 """
-Tests for sdk/logshipper.py - CIRISLens log shipping.
+Tests for CIRISLens LogShipper SDK (via submodule).
 
 Uses:
 - pytest fixtures for LogShipper instances
@@ -19,12 +19,12 @@ from io import BytesIO
 import pytest
 from hypothesis import given, strategies as st, settings
 
-from sdk.logshipper import (
+from libs.cirislens.sdk import (
     LogShipper,
     LogShipperHandler,
     setup_logging,
     from_env,
-    DEFAULT_CIRISLENS_ENDPOINT,
+    DEFAULT_ENDPOINT,
 )
 
 
@@ -46,7 +46,7 @@ class TestLogShipperInit:
         try:
             assert shipper.service_name == "test"
             assert shipper.token == "token123"
-            assert shipper.endpoint == DEFAULT_CIRISLENS_ENDPOINT
+            assert shipper.endpoint == DEFAULT_ENDPOINT
             assert shipper.batch_size == 100
             assert shipper.flush_interval == 5.0
             assert shipper.max_retries == 3
@@ -222,7 +222,7 @@ class TestLogShipperSendLogs:
         mock_response.__enter__ = MagicMock(return_value=mock_response)
         mock_response.__exit__ = MagicMock(return_value=False)
 
-        with patch("sdk.logshipper.urlopen", return_value=mock_response):
+        with patch("libs.cirislens.sdk.logshipper.urlopen", return_value=mock_response):
             result = shipper._send_logs(logs)
 
         assert result is True
@@ -240,8 +240,8 @@ class TestLogShipperSendLogs:
             fp=BytesIO(b""),
         )
 
-        with patch("sdk.logshipper.urlopen", side_effect=error):
-            with patch("sdk.logshipper.time.sleep"):  # Skip backoff
+        with patch("libs.cirislens.sdk.logshipper.urlopen", side_effect=error):
+            with patch("libs.cirislens.sdk.logshipper.time.sleep"):  # Skip backoff
                 result = shipper._send_logs(logs)
 
         assert result is False
@@ -267,7 +267,7 @@ class TestLogShipperSendLogs:
             call_count += 1
             raise error
 
-        with patch("sdk.logshipper.urlopen", side_effect=mock_urlopen):
+        with patch("libs.cirislens.sdk.logshipper.urlopen", side_effect=mock_urlopen):
             result = shipper._send_logs(logs)
 
         assert result is False
@@ -284,8 +284,8 @@ class TestLogShipperSendLogs:
             call_count += 1
             raise URLError("Connection refused")
 
-        with patch("sdk.logshipper.urlopen", side_effect=mock_urlopen):
-            with patch("sdk.logshipper.time.sleep"):  # Skip backoff
+        with patch("libs.cirislens.sdk.logshipper.urlopen", side_effect=mock_urlopen):
+            with patch("libs.cirislens.sdk.logshipper.time.sleep"):  # Skip backoff
                 result = shipper._send_logs(logs)
 
         assert result is False

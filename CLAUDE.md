@@ -7,6 +7,7 @@
 **CI/CD:** GitHub Actions → GHCR
 
 ### Recent Changes
+- Migrated LogShipper to CIRISLens git submodule (libs/cirislens/sdk)
 - Added Exa AI as primary ZDR-compliant search provider (Brave fallback)
 - Enhanced error logging with provider identification for debugging
 - Refactored high cognitive complexity functions (SonarCloud compliant)
@@ -59,8 +60,9 @@ CIRISProxy/
 │   ├── custom_auth.py      # Google OAuth token verification
 │   ├── search_handler.py   # Web search (Exa primary, Brave fallback)
 │   └── status_handler.py   # Provider health monitoring
-├── sdk/
-│   └── logshipper.py       # CIRISLens log shipping SDK
+├── libs/                   # Git submodules for sister repos
+│   └── cirislens/          # → github.com/CIRISAI/CIRISLens
+│       └── sdk/            # LogShipper, resilience patterns
 ├── tests/                  # 200 tests, 86% coverage
 │   ├── test_billing_callback.py
 │   ├── test_custom_auth.py

@@ -1,0 +1,3 @@
+[submodule "/home/emoore/CIRISProxy/libs/cirislens"]
+	path = /home/emoore/CIRISProxy/libs/cirislens
+	url = https://github.com/CIRISAI/CIRISLens.git
