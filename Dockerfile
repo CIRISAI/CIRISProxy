@@ -7,10 +7,10 @@ FROM ghcr.io/berriai/litellm:main-latest
 RUN pip install --no-cache-dir google-auth>=2.0.0 httpx>=0.24.0
 
 # Create directories
-RUN mkdir -p /app/sdk /app/hooks /app/logs
+RUN mkdir -p /app/libs /app/hooks /app/logs
 
-# Copy SDK
-COPY sdk/ /app/sdk/
+# Copy SDK (from git submodule)
+COPY libs/ /app/libs/
 
 # Copy hooks (billing callback, custom auth, search handler, and status handler)
 COPY hooks/billing_callback.py /app/billing_callback.py
