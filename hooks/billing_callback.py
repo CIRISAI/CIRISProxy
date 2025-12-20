@@ -195,6 +195,11 @@ def _hash_id(user_id: str) -> str:
     return hashlib.sha256(user_id.encode()).hexdigest()[:8]
 
 
+def _is_http_success(status_code: int) -> bool:
+    """Check if HTTP status code indicates success (2xx range)."""
+    return 200 <= status_code < 300
+
+
 def _ship_log(
     level: str,
     message: str,
@@ -368,17 +373,19 @@ class CIRISBillingCallback(CustomLogger):
                 },
             )
 
-            if resp.status_code == 200:
+            if _is_http_success(resp.status_code):
                 print(
                     f"[CIRIS USAGE] LOGGED interaction={interaction_id} "
                     f"calls={usage_data.get('llm_calls', 0)} "
                     f"tokens={usage_data.get('prompt_tokens', 0)}+{usage_data.get('completion_tokens', 0)} "
-                    f"cost_cents={usage_data.get('cost_cents', 0):.2f}",
+                    f"cost_cents={usage_data.get('cost_cents', 0):.2f} "
+                    f"status={resp.status_code}",
                     flush=True
                 )
             else:
                 print(
-                    f"[CIRIS USAGE] FAILED to log interaction={interaction_id} status={resp.status_code}",
+                    f"[CIRIS USAGE] FAILED to log interaction={interaction_id} "
+                    f"status={resp.status_code} body={resp.text[:100] if resp.text else 'empty'}",
                     flush=True
                 )
 
@@ -428,20 +435,22 @@ class CIRISBillingCallback(CustomLogger):
                 },
             )
 
-            if resp.status_code == 200:
+            if _is_http_success(resp.status_code):
                 logger.debug(
-                    "interaction=%s usage_streamed=true model=%s tokens=%d/%d",
+                    "interaction=%s usage_streamed=true model=%s tokens=%d/%d status=%d",
                     interaction_id,
                     model,
                     prompt_tokens,
                     completion_tokens,
+                    resp.status_code,
                 )
             else:
-                # Log at debug level to avoid spamming - usage logging is best-effort
-                logger.debug(
-                    "interaction=%s usage_stream=failed status=%d",
+                # Log at warning level for real failures (non-2xx)
+                logger.warning(
+                    "interaction=%s usage_stream=failed status=%d body=%s",
                     interaction_id,
                     resp.status_code,
+                    resp.text[:100] if resp.text else "empty",
                 )
 
         except httpx.RequestError as e:
@@ -1055,19 +1064,21 @@ class CIRISBillingCallback(CustomLogger):
                 },
             )
 
-            if resp.status_code == 200:
+            if _is_http_success(resp.status_code):
                 logger.info(
-                    "interaction=%s usage_logged=true calls=%d tokens=%d cost_cents=%.2f",
+                    "interaction=%s usage_logged=true calls=%d tokens=%d cost_cents=%.2f status=%d",
                     interaction_id,
                     usage_data["llm_calls"],
                     usage_data["prompt_tokens"] + usage_data["completion_tokens"],
                     usage_data["cost_cents"],
+                    resp.status_code,
                 )
             else:
                 logger.warning(
-                    "interaction=%s usage_logged=false status=%d",
+                    "interaction=%s usage_logged=false status=%d body=%s",
                     interaction_id,
                     resp.status_code,
+                    resp.text[:100] if resp.text else "empty",
                 )
 
         except httpx.RequestError as e:

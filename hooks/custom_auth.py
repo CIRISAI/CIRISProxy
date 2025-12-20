@@ -12,14 +12,201 @@ NOTE: Expiration checking is DISABLED. The Android app may send tokens that
 expired hours ago. We still verify the signature (token was issued by Google)
 and audience (token was issued for our app). The user ID is stable and the
 billing service handles authorization.
+
+SECURITY NOTE: Auth failures are logged for debugging but MUST NOT include:
+- Full tokens (only format/length hints)
+- User IDs or PII
+- Request body content
+Only log: token format classification, error type, user agent, request path
 """
 
+import hashlib
+import logging
 import os
 import time
 
 from fastapi import Request
 from litellm.proxy._types import UserAPIKeyAuth
 from litellm.proxy.proxy_server import ProxyException
+
+# Configure logger for auth events
+logger = logging.getLogger(__name__)
+
+
+def _classify_token_format(token: str) -> dict[str, any]:
+    """
+    Classify a token's format for debugging without exposing the token itself.
+
+    Returns metadata about the token structure that helps identify:
+    - Bots sending garbage
+    - Malformed tokens from buggy clients
+    - Expired but valid tokens
+    - Wrong audience tokens
+
+    SECURITY: Only returns structural info, never the token content.
+    """
+    if not token:
+        return {"format": "empty", "length": 0}
+
+    result = {
+        "length": len(token),
+        "format": "unknown",
+    }
+
+    # Check for JWT structure (three base64 segments separated by dots)
+    parts = token.split(".")
+    if len(parts) == 3:
+        # Looks like a JWT
+        result["format"] = "jwt"
+        result["header_len"] = len(parts[0])
+        result["payload_len"] = len(parts[1])
+        result["sig_len"] = len(parts[2])
+
+        # Check if parts look like valid base64
+        import base64
+        try:
+            # Try to decode header to check if it's valid base64
+            # Add padding if needed
+            padded = parts[0] + "=" * (4 - len(parts[0]) % 4)
+            base64.urlsafe_b64decode(padded)
+            result["header_valid_b64"] = True
+        except Exception:
+            result["header_valid_b64"] = False
+
+    elif len(parts) == 2:
+        result["format"] = "jwt_incomplete"
+    elif token.startswith("sk-") or token.startswith("Bearer "):
+        result["format"] = "api_key_like"
+    elif len(token) < 20:
+        result["format"] = "too_short"
+    elif not token.replace("-", "").replace("_", "").isalnum():
+        result["format"] = "contains_special_chars"
+    else:
+        result["format"] = "opaque_string"
+
+    # Hash prefix for correlation (allows matching without exposing token)
+    result["prefix_hash"] = hashlib.sha256(token[:8].encode()).hexdigest()[:8] if len(token) >= 8 else "short"
+
+    return result
+
+
+def _classify_auth_error(error: Exception) -> dict[str, str]:
+    """
+    Classify an auth error for structured logging.
+
+    Returns:
+        Dict with error_type and error_category for debugging.
+    """
+    error_msg = str(error).lower()
+
+    if "expired" in error_msg:
+        return {"error_type": "token_expired", "error_category": "temporal"}
+    elif "audience" in error_msg:
+        return {"error_type": "wrong_audience", "error_category": "configuration"}
+    elif "issuer" in error_msg:
+        return {"error_type": "wrong_issuer", "error_category": "configuration"}
+    elif "signature" in error_msg or "verification" in error_msg:
+        return {"error_type": "invalid_signature", "error_category": "security"}
+    elif "decode" in error_msg or "malformed" in error_msg or "invalid" in error_msg:
+        return {"error_type": "malformed_token", "error_category": "format"}
+    elif "network" in error_msg or "connection" in error_msg or "timeout" in error_msg:
+        return {"error_type": "network_error", "error_category": "infrastructure"}
+    else:
+        return {"error_type": "unknown", "error_category": "unknown"}
+
+
+def _extract_request_metadata(request: Request | None) -> dict[str, str]:
+    """
+    Extract safe request metadata for logging.
+
+    SECURITY: Only extracts non-PII metadata.
+    - User-Agent helps identify bots vs real apps
+    - Path helps identify which endpoint was targeted
+    """
+    if not request:
+        return {}
+
+    metadata = {}
+
+    # User-Agent helps identify bots (curl, python-requests) vs real apps
+    try:
+        headers = getattr(request, "headers", None)
+        user_agent = headers.get("user-agent", "") if headers else ""
+    except Exception:
+        user_agent = ""
+
+    if user_agent:
+        # Truncate to avoid logging huge UA strings
+        metadata["user_agent"] = user_agent[:100]
+
+        # Classify UA for easier querying
+        ua_lower = user_agent.lower()
+        if "android" in ua_lower or "ciris" in ua_lower:
+            metadata["client_type"] = "android_app"
+        elif "python" in ua_lower or "requests" in ua_lower or "httpx" in ua_lower:
+            metadata["client_type"] = "python_client"
+        elif "curl" in ua_lower:
+            metadata["client_type"] = "curl"
+        elif "go-http" in ua_lower or "golang" in ua_lower:
+            metadata["client_type"] = "go_client"
+        elif "scanner" in ua_lower or "bot" in ua_lower:
+            metadata["client_type"] = "scanner"
+        else:
+            metadata["client_type"] = "other"
+
+    # Request path (already in logs but useful for filtering)
+    try:
+        url = getattr(request, "url", None)
+        if url and hasattr(url, "path"):
+            metadata["path"] = str(url.path)[:50]
+    except Exception:
+        pass  # Skip path if not available
+
+    return metadata
+
+
+def _log_auth_failure(
+    token: str,
+    error: Exception | None,
+    reason: str,
+    request: Request | None = None,
+) -> None:
+    """
+    Log an authentication failure with structured debugging context.
+
+    SECURITY: Never logs the token itself, only format classification.
+
+    Args:
+        token: The token that failed (for format analysis only)
+        error: The exception that caused the failure
+        reason: Human-readable failure reason
+        request: Optional request object for metadata extraction
+    """
+    token_info = _classify_token_format(token)
+    error_info = _classify_auth_error(error) if error else {"error_type": "none", "error_category": "none"}
+    request_info = _extract_request_metadata(request)
+
+    log_data = {
+        "event": "auth_failure",
+        "reason": reason,
+        **token_info,
+        **error_info,
+        **request_info,
+    }
+
+    # Log at appropriate level based on error category
+    if error_info.get("error_category") == "security":
+        logger.warning("auth_failure reason=%s error_type=%s token_format=%s client=%s",
+                       reason, error_info.get("error_type"), token_info.get("format"),
+                       request_info.get("client_type", "unknown"))
+    else:
+        # Most auth failures are expected (expired tokens, bots, etc.)
+        logger.info("auth_failure reason=%s error_type=%s token_format=%s client=%s",
+                    reason, error_info.get("error_type"), token_info.get("format"),
+                    request_info.get("client_type", "unknown"))
+
+    # Also log full structured data at debug level for detailed investigation
+    logger.debug("auth_failure_detail %s", log_data)
 
 # Google OAuth Client IDs - both web and Android client IDs are valid audiences
 # Web client ID (used as audience for most ID tokens)
@@ -413,6 +600,12 @@ async def user_api_key_auth(request: Request, api_key: str) -> UserAPIKeyAuth | 
         ProxyException: If token is missing, invalid, or verification fails
     """
     if not api_key:
+        _log_auth_failure(
+            token="",
+            error=None,
+            reason="missing_token",
+            request=request,
+        )
         raise ProxyException(
             message="Missing authorization token",
             type="auth_error",
@@ -448,7 +641,21 @@ async def user_api_key_auth(request: Request, api_key: str) -> UserAPIKeyAuth | 
             user_id=user_id,
         )
 
-    except ProxyException:
+    except ProxyException as e:
+        # Log all ProxyException auth failures for debugging
+        _log_auth_failure(
+            token=api_key,
+            error=e,
+            reason=e.message[:50] if hasattr(e, "message") else "proxy_exception",
+            request=request,
+        )
         raise
     except Exception as e:
+        # Log unexpected errors before converting to ProxyException
+        _log_auth_failure(
+            token=api_key,
+            error=e,
+            reason="verification_failed",
+            request=request,
+        )
         _handle_verification_error(e)
