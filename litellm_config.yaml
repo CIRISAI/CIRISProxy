@@ -24,6 +24,9 @@ model_list:
     litellm_params:
       model: "openrouter/meta-llama/llama-4-maverick"
       api_key: "os.environ/OPENROUTER_API_KEY"
+      extra_body:
+        provider:
+          ignore: ["Friendli", "Google"]
 
   # GPT-OSS-20B - OpenAI's open-weight model (Apache 2.0)
   # NOTE: Weak at structured outputs / tool calling - kept for reference
@@ -51,6 +54,9 @@ model_list:
       model: "openrouter/openai/gpt-oss-20b"
       api_key: "os.environ/OPENROUTER_API_KEY"
       max_tokens: 131072
+      extra_body:
+        provider:
+          ignore: ["Friendli", "Google"]
 
   # Groq Models (fast, cost-effective)
   - model_name: "groq/llama-3.3-70b"
@@ -98,6 +104,9 @@ model_list:
       model: "openrouter/meta-llama/llama-4-maverick"
       api_key: "os.environ/OPENROUTER_API_KEY"
       max_tokens: 16384  # Allow long outputs for agent responses
+      extra_body:
+        provider:
+          ignore: ["Friendli", "Google"]
 
   - model_name: "fast"
     litellm_params:

@@ -88,6 +88,7 @@ CIRISProxy/
 | `GOOGLE_CLIENT_ID` | Yes | Google OAuth client ID |
 | `CIRISLENS_TOKEN` | No | Log shipping token |
 | `LITELLM_MASTER_KEY` | Yes | Admin operations key |
+| `OPENROUTER_IGNORE_PROVIDERS` | No | Comma-separated providers to exclude (e.g., "Friendli,Google") |
 
 ## Model Routing
 

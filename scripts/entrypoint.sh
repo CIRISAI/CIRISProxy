@@ -4,6 +4,11 @@
 
 set -e
 
+echo "[CIRISProxy] Preprocessing config..."
+
+# Preprocess config to apply env var overrides (e.g., OPENROUTER_IGNORE_PROVIDERS)
+python /app/preprocess_config.py /app/config.yaml /app/config.processed.yaml
+
 echo "[CIRISProxy] Pre-loading modules..."
 
 # Force-import callback and status modules to ensure they're loaded
@@ -36,8 +41,8 @@ except Exception as e:
 
 echo "[CIRISProxy] Starting server with custom routes..."
 
-# Parse arguments for config and port
-CONFIG_FILE="/app/config.yaml"
+# Parse arguments for config and port (use processed config by default)
+CONFIG_FILE="/app/config.processed.yaml"
 PORT="4000"
 
 while [[ $# -gt 0 ]]; do

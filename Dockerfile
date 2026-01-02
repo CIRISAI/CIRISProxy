@@ -27,7 +27,8 @@ COPY litellm_config.yaml /app/config.yaml
 # Copy scripts
 COPY scripts/healthcheck.py /app/healthcheck.py
 COPY scripts/entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/healthcheck.py /app/entrypoint.sh
+COPY scripts/preprocess_config.py /app/preprocess_config.py
+RUN chmod +x /app/healthcheck.py /app/entrypoint.sh /app/preprocess_config.py
 
 # Set working directory
 WORKDIR /app
