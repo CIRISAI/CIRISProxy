@@ -26,8 +26,9 @@ CIRISProxy is **temporary bridging infrastructure** that enables CIRIS ethical a
 | **API Key Isolation** | Provider keys (Groq, Together, OpenRouter) stored server-side only |
 | **Credit Gating** | Users authenticate via Google OAuth; credits enforced per-interaction |
 | **Per-Interaction Billing** | 1 credit = 1 user interaction (12-70 LLM calls typical) |
-| **Vision Routing** | Automatic rerouting of multimodal requests to compatible providers |
+| **Provider Routing** | Multi-provider fallback with configurable provider exclusions |
 | **ZDR Web Search** | Exa AI primary (Zero Data Retention), Brave fallback |
+| **Test Auth Mode** | Integration testing without Google OAuth infrastructure |
 | **Observability** | Structured logging to CIRISLens for audit trails |
 
 ### Safety & Privacy
@@ -79,6 +80,9 @@ curl -X POST http://localhost:4000/v1/chat/completions \
 | `BILLING_API_KEY` | Yes | Service-to-service auth key |
 | `GOOGLE_CLIENT_ID` | Yes | Google OAuth client ID for token verification |
 | `CIRISLENS_TOKEN` | No | Token for log shipping to CIRISLens |
+| `OPENROUTER_IGNORE_PROVIDERS` | No | Comma-separated providers to exclude (e.g., "Friendli,Google") |
+| `CIRIS_TEST_AUTH_ENABLED` | No | Enable test auth mode (`true` to enable) |
+| `CIRIS_TEST_USER_ID` | No | Test user ID (default: `ciris_synthetic_canary`) |
 
 *Either `EXA_API_KEY` or `BRAVE_API_KEY` required for web search functionality.
 
@@ -91,6 +95,60 @@ curl -X POST http://localhost:4000/v1/chat/completions \
 | `/v1/status/simple` | GET | Simple liveness check |
 | `/v1/web/search` | POST | Web search (requires credits) |
 | `/health/liveliness` | GET | Container health check |
+
+## Test Auth Mode
+
+For integration testing without Google OAuth infrastructure, CIRISProxy supports a test auth mode that validates opaque tokens via CIRISBilling.
+
+### Setup
+
+**1. Generate a test token:**
+```bash
+openssl rand -hex 32
+# Example: c6d7c30dd742f4424c5a214cf5a6bd23838ad40bac177634b5667c1811f1814b
+```
+
+**2. Configure CIRISProxy:**
+```bash
+CIRIS_TEST_AUTH_ENABLED=true
+CIRIS_TEST_USER_ID=ciris_synthetic_canary
+BILLING_API_URL=http://billing:8000
+```
+
+**3. Configure CIRISBilling** (must also have test auth enabled):
+```bash
+CIRIS_TEST_AUTH_ENABLED=True
+CIRIS_TEST_AUTH_TOKEN=c6d7c30dd742f4424c5a214cf5a6bd23838ad40bac177634b5667c1811f1814b
+CIRIS_TEST_USER_ID=ciris_synthetic_canary
+```
+
+### Usage
+
+```bash
+# Make authenticated requests with test token
+curl -X POST http://localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer c6d7c30dd742f4424c5a214cf5a6bd23838ad40bac177634b5667c1811f1814b" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "default",
+    "messages": [{"role": "user", "content": "Hello"}],
+    "metadata": {"interaction_id": "test-123"}
+  }'
+```
+
+### How It Works
+
+1. Proxy detects non-JWT tokens (opaque hex strings ≥32 chars)
+2. Calls CIRISBilling `/v1/billing/credits/check` to validate
+3. If billing returns `has_credit: true`, request is authorized
+4. User identity becomes `test:{user_id}` for billing tracking
+
+### Security
+
+- **Never enable in production** - bypasses Google OAuth entirely
+- Test users get standard credit limits (10 free, 2 daily)
+- All test token usage logged at WARNING level
+- CIRISBilling refuses to start if enabled with `ENVIRONMENT=production`
 
 ## Development
 
@@ -118,15 +176,18 @@ ruff check .
 CIRISProxy/
 ├── hooks/
 │   ├── billing_callback.py   # LiteLLM callback for billing integration
-│   ├── custom_auth.py        # Google OAuth token verification
-│   ├── search_handler.py     # Web search with Brave API
+│   ├── custom_auth.py        # Google OAuth + test token verification
+│   ├── search_handler.py     # Web search (Exa/Brave)
 │   └── status_handler.py     # Provider health monitoring
-├── sdk/
-│   └── logshipper.py         # CIRISLens log shipping SDK
+├── libs/
+│   └── cirislens/sdk/        # CIRISLens log shipping (git submodule)
+├── scripts/
+│   ├── entrypoint.sh         # Container entrypoint
+│   └── preprocess_config.py  # Config env var processing
 ├── server.py                 # Custom FastAPI endpoints
 ├── litellm_config.yaml       # Model routing configuration
 ├── docker-compose.yml        # Container orchestration
-└── tests/                    # Test suite (185 tests, 86% coverage)
+└── tests/                    # Test suite (221 tests, 86% coverage)
 ```
 
 ## Ecosystem
