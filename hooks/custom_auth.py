@@ -13,6 +13,11 @@ expired hours ago. We still verify the signature (token was issued by Google)
 and audience (token was issued for our app). The user ID is stable and the
 billing service handles authorization.
 
+TEST AUTH MODE: When CIRIS_TEST_AUTH_ENABLED=true, the proxy also accepts
+opaque test tokens (hex strings). These are validated by calling CIRISBilling's
+/v1/billing/credits/check endpoint directly. This enables integration testing
+without Google OAuth infrastructure.
+
 SECURITY NOTE: Auth failures are logged for debugging but MUST NOT include:
 - Full tokens (only format/length hints)
 - User IDs or PII
@@ -25,6 +30,7 @@ import logging
 import os
 import time
 
+import httpx
 from fastapi import Request
 from litellm.proxy._types import UserAPIKeyAuth
 from litellm.proxy.proxy_server import ProxyException
@@ -208,6 +214,13 @@ def _log_auth_failure(
     # Also log full structured data at debug level for detailed investigation
     logger.debug("auth_failure_detail %s", log_data)
 
+# Test auth mode configuration
+# When enabled, accepts opaque test tokens validated via CIRISBilling
+CIRIS_TEST_AUTH_ENABLED = os.environ.get("CIRIS_TEST_AUTH_ENABLED", "").lower() == "true"
+CIRIS_TEST_USER_ID = os.environ.get("CIRIS_TEST_USER_ID", "ciris_synthetic_canary")
+BILLING_API_URL = os.environ.get("BILLING_API_URL", "")
+BILLING_API_KEY = os.environ.get("BILLING_API_KEY", "")
+
 # Google OAuth Client IDs - both web and Android client IDs are valid audiences
 # Web client ID (used as audience for most ID tokens)
 GOOGLE_CLIENT_ID_WEB = os.environ.get(
@@ -222,16 +235,23 @@ GOOGLE_CLIENT_ID_ANDROID = os.environ.get(
 # All valid client IDs
 GOOGLE_CLIENT_IDS = [GOOGLE_CLIENT_ID_WEB, GOOGLE_CLIENT_ID_ANDROID]
 
-# Cache for verified tokens: token -> (user_id, cache_until_timestamp)
+if CIRIS_TEST_AUTH_ENABLED:
+    logger.warning("TEST AUTH MODE ENABLED - test tokens will be accepted")
+
+# Cache for verified tokens: token -> (user_id, auth_type, cache_until_timestamp)
 # This avoids re-verifying the same token on every request
 # We cache for 24 hours since we don't check expiration anyway
-_token_cache: dict[str, tuple[str, float]] = {}
+# auth_type is "google" or "test" to distinguish token sources
+_token_cache: dict[str, tuple[str, str, float]] = {}
 
 # Maximum cache size to prevent memory issues
 _MAX_CACHE_SIZE = 10000
 
 # Cache tokens for 24 hours (signature verification is expensive)
 _CACHE_DURATION_SECONDS = 86400
+
+# HTTP client for test token validation (reused across requests)
+_http_client: "httpx.AsyncClient | None" = None
 
 
 def _cleanup_cache() -> None:
@@ -240,9 +260,94 @@ def _cleanup_cache() -> None:
         return
 
     now = time.time()
-    expired = [k for k, (_, exp) in _token_cache.items() if exp < now]
+    expired = [k for k, (_, _, exp) in _token_cache.items() if exp < now]
     for k in expired:
         del _token_cache[k]
+
+
+def _is_test_token(token: str) -> bool:
+    """
+    Check if a token looks like a test token (opaque hex string) vs a JWT.
+
+    Test tokens are hex strings like "c6d7c30dd742f4424c5a214cf5a6bd23..."
+    JWTs have 3 base64 segments separated by dots.
+    """
+    if not token:
+        return False
+
+    # JWTs have 3 segments separated by dots
+    if token.count(".") == 2:
+        return False
+
+    # Test tokens are typically 64-char hex strings, but we accept any hex-like string
+    # that's at least 32 chars (16 bytes) for security
+    if len(token) < 32:
+        return False
+
+    # Check if it looks like a hex string (alphanumeric, no special chars except _-)
+    return token.replace("-", "").replace("_", "").isalnum()
+
+
+async def _get_http_client() -> httpx.AsyncClient:
+    """Get or create the shared HTTP client for test token validation."""
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.AsyncClient(timeout=10.0)
+    return _http_client
+
+
+async def _validate_test_token(token: str) -> tuple[str, bool]:
+    """
+    Validate a test token by calling CIRISBilling's credits/check endpoint.
+
+    The billing service validates the token and returns user info if valid.
+
+    Args:
+        token: The test token to validate
+
+    Returns:
+        Tuple of (user_id, is_valid)
+    """
+    if not BILLING_API_URL:
+        logger.error("test_auth_error: BILLING_API_URL not configured")
+        return "", False
+
+    try:
+        client = await _get_http_client()
+        response = await client.post(
+            f"{BILLING_API_URL}/v1/billing/credits/check",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "oauth_provider": "oauth:test",
+                "external_id": CIRIS_TEST_USER_ID,
+            },
+        )
+
+        if response.status_code == 200:
+            data = response.json()
+            # If billing accepts the token, it has credits
+            if data.get("has_credit", False):
+                logger.info("test_auth_success user_id=%s", CIRIS_TEST_USER_ID[:8])
+                return CIRIS_TEST_USER_ID, True
+            else:
+                logger.warning("test_auth_denied reason=no_credits user_id=%s", CIRIS_TEST_USER_ID[:8])
+                return CIRIS_TEST_USER_ID, False
+        elif response.status_code == 401:
+            logger.warning("test_auth_denied reason=invalid_token")
+            return "", False
+        else:
+            logger.error("test_auth_error status=%d", response.status_code)
+            return "", False
+
+    except httpx.TimeoutException:
+        logger.error("test_auth_error reason=timeout")
+        return "", False
+    except Exception as e:
+        logger.error("test_auth_error reason=%s", str(e)[:50])
+        return "", False
 
 
 def _get_cached_auth(api_key: str) -> UserAPIKeyAuth | None:
@@ -258,10 +363,10 @@ def _get_cached_auth(api_key: str) -> UserAPIKeyAuth | None:
     if api_key not in _token_cache:
         return None
 
-    user_id, cache_until = _token_cache[api_key]
+    user_id, auth_type, cache_until = _token_cache[api_key]
     if time.time() < cache_until:
         return UserAPIKeyAuth(
-            api_key=f"google:{user_id}",
+            api_key=f"{auth_type}:{user_id}",
             user_id=user_id,
         )
 
@@ -416,17 +521,18 @@ def _extract_user_id(idinfo: dict) -> str:
     return user_id
 
 
-def _cache_token(api_key: str, user_id: str) -> None:
+def _cache_token(api_key: str, user_id: str, auth_type: str = "google") -> None:
     """
     Cache a verified token.
 
     Args:
         api_key: The token to cache
         user_id: The extracted user ID
+        auth_type: The auth type ("google" or "test")
     """
     cache_until = time.time() + _CACHE_DURATION_SECONDS
     _cleanup_cache()
-    _token_cache[api_key] = (user_id, cache_until)
+    _token_cache[api_key] = (user_id, auth_type, cache_until)
 
 
 def _handle_verification_error(error: Exception) -> None:
@@ -480,9 +586,9 @@ def _get_cached_idinfo(token: str) -> dict | None:
     if token not in _token_cache:
         return None
 
-    user_id, cache_until = _token_cache[token]
+    user_id, auth_type, cache_until = _token_cache[token]
     if time.time() < cache_until:
-        return {"sub": user_id}
+        return {"sub": user_id, "_auth_type": auth_type}
 
     # Cache entry expired, remove it
     del _token_cache[token]
@@ -531,18 +637,20 @@ def _try_decode_expired_token_silent(token: str, jwt_module, last_error: Excepti
     return None
 
 
-async def verify_google_token(token: str) -> dict | None:
+async def verify_token(token: str) -> dict | None:
     """
-    Verify a Google ID token and return user info.
+    Verify an authentication token and return user info.
 
-    This is a reusable function for endpoints that need Google auth
-    but aren't using LiteLLM's auth middleware (e.g., /v1/web/search).
+    Supports both Google ID tokens (JWTs) and test tokens (opaque strings).
+    This is a reusable function for endpoints that need auth but aren't
+    using LiteLLM's auth middleware (e.g., /v1/web/search).
 
     Args:
-        token: Google ID token (JWT)
+        token: Google ID token (JWT) or test token (opaque string)
 
     Returns:
-        dict with 'sub' (user ID) and other claims, or None if invalid
+        dict with 'sub' (user ID) and '_auth_type' ("google" or "test"),
+        or None if invalid
     """
     if not token:
         return None
@@ -552,7 +660,15 @@ async def verify_google_token(token: str) -> dict | None:
     if cached:
         return cached
 
-    # Import google auth libraries
+    # Test auth mode: validate opaque tokens via CIRISBilling
+    if CIRIS_TEST_AUTH_ENABLED and _is_test_token(token):
+        user_id, is_valid = await _validate_test_token(token)
+        if is_valid:
+            _cache_token(token, user_id, "test")
+            return {"sub": user_id, "_auth_type": "test"}
+        return None
+
+    # Google OAuth: validate JWT tokens
     modules = _try_import_google_auth_silent()
     if not modules:
         return None
@@ -575,26 +691,34 @@ async def verify_google_token(token: str) -> dict | None:
             return None
 
         # Cache and return
-        _cache_token(token, user_id)
+        _cache_token(token, user_id, "google")
+        idinfo["_auth_type"] = "google"
         return idinfo
 
     except Exception:
         return None
 
 
+# Alias for backwards compatibility
+async def verify_google_token(token: str) -> dict | None:
+    """Deprecated: Use verify_token instead."""
+    return await verify_token(token)
+
+
 async def user_api_key_auth(request: Request, api_key: str) -> UserAPIKeyAuth | str:
     """
-    Verify Google ID token and extract user identity.
+    Verify authentication token and extract user identity.
 
-    The api_key parameter is actually a Google ID token (JWT).
-    We verify it against Google's public keys and extract the user ID.
+    Supports two auth modes:
+    1. Google OAuth (default): Validates Google ID tokens (JWTs)
+    2. Test mode: Validates opaque test tokens via CIRISBilling
 
     Args:
         request: The incoming FastAPI request object
-        api_key: The Google ID token from the Authorization header (after "Bearer ")
+        api_key: The token from the Authorization header (after "Bearer ")
 
     Returns:
-        UserAPIKeyAuth object with api_key="google:{user_id}"
+        UserAPIKeyAuth object with api_key="{provider}:{user_id}"
 
     Raises:
         ProxyException: If token is missing, invalid, or verification fails
@@ -613,12 +737,35 @@ async def user_api_key_auth(request: Request, api_key: str) -> UserAPIKeyAuth | 
             code=401,
         )
 
-    # Check cache first (avoids network call to Google)
+    # Check cache first (avoids network call to Google or billing)
     cached_auth = _get_cached_auth(api_key)
     if cached_auth:
         return cached_auth
 
-    # Import Google auth libraries
+    # Test auth mode: validate opaque tokens via CIRISBilling
+    if CIRIS_TEST_AUTH_ENABLED and _is_test_token(api_key):
+        user_id, is_valid = await _validate_test_token(api_key)
+        if is_valid:
+            _cache_token(api_key, user_id, "test")
+            return UserAPIKeyAuth(
+                api_key=f"test:{user_id}",
+                user_id=user_id,
+            )
+        else:
+            _log_auth_failure(
+                token=api_key,
+                error=None,
+                reason="test_token_invalid",
+                request=request,
+            )
+            raise ProxyException(
+                message="Invalid test authentication token",
+                type="auth_error",
+                param="Authorization",
+                code=401,
+            )
+
+    # Google OAuth: validate JWT tokens
     id_token_module, google_requests, jwt_module = _import_google_auth()
 
     try:
@@ -633,7 +780,7 @@ async def user_api_key_auth(request: Request, api_key: str) -> UserAPIKeyAuth | 
         user_id = _extract_user_id(idinfo)
 
         # Cache the verified token
-        _cache_token(api_key, user_id)
+        _cache_token(api_key, user_id, "google")
 
         # Return with google:{user_id} format for billing callback compatibility
         return UserAPIKeyAuth(

@@ -89,6 +89,8 @@ CIRISProxy/
 | `CIRISLENS_TOKEN` | No | Log shipping token |
 | `LITELLM_MASTER_KEY` | Yes | Admin operations key |
 | `OPENROUTER_IGNORE_PROVIDERS` | No | Comma-separated providers to exclude (e.g., "Friendli,Google") |
+| `CIRIS_TEST_AUTH_ENABLED` | No | Enable test auth mode ("true" to enable) |
+| `CIRIS_TEST_USER_ID` | No | Test user ID (default: "ciris_synthetic_canary") |
 
 ## Model Routing
 
@@ -119,6 +121,27 @@ User sends message →
     Only FIRST call charges via idempotency_key →
   User charged exactly 1 credit
 ```
+
+## Test Auth Mode
+
+For integration testing without Google OAuth infrastructure:
+
+```bash
+# Enable test auth mode
+CIRIS_TEST_AUTH_ENABLED=true
+CIRIS_TEST_USER_ID=ciris_synthetic_canary
+
+# CIRISBilling must also have test auth enabled with matching token
+BILLING_API_URL=http://billing:8000
+```
+
+**Flow:**
+1. Client sends opaque test token (64-char hex string) instead of Google JWT
+2. Proxy detects non-JWT token and validates via CIRISBilling `/v1/billing/credits/check`
+3. Billing validates token and returns credit status
+4. Proxy returns `test:{user_id}` format for billing callback
+
+**Security:** Never enable in production. Test tokens bypass Google OAuth entirely.
 
 ## CIRISLens Events
 

@@ -65,11 +65,14 @@ from hooks.custom_auth import (
     _get_cached_idinfo,
     _try_import_google_auth_silent,
     _try_decode_expired_token_silent,
+    _is_test_token,
+    _validate_test_token,
     _token_cache,
     _CACHE_DURATION_SECONDS,
     GOOGLE_CLIENT_IDS,
     user_api_key_auth,
     verify_google_token,
+    verify_token,
 )
 
 
@@ -82,8 +85,8 @@ class TestCleanupCache:
 
     def test_cleanup_does_nothing_under_limit(self):
         """Test that cleanup doesn't run when cache is under limit."""
-        _token_cache["token1"] = ("user1", time.time() + 100)
-        _token_cache["token2"] = ("user2", time.time() + 100)
+        _token_cache["token1"] = ("user1", "google", time.time() + 100)
+        _token_cache["token2"] = ("user2", "google", time.time() + 100)
 
         _cleanup_cache()
 
@@ -95,10 +98,10 @@ class TestCleanupCache:
         for i in range(10001):
             if i < 5000:
                 # Half are expired
-                _token_cache[f"token{i}"] = (f"user{i}", time.time() - 100)
+                _token_cache[f"token{i}"] = (f"user{i}", "google", time.time() - 100)
             else:
                 # Half are valid
-                _token_cache[f"token{i}"] = (f"user{i}", time.time() + 100)
+                _token_cache[f"token{i}"] = (f"user{i}", "google", time.time() + 100)
 
         _cleanup_cache()
 
@@ -120,7 +123,7 @@ class TestGetCachedAuth:
 
     def test_returns_auth_for_valid_cached_token(self):
         """Test that valid cached tokens return auth object."""
-        _token_cache["valid-token"] = ("user123", time.time() + 3600)
+        _token_cache["valid-token"] = ("user123", "google", time.time() + 3600)
 
         result = _get_cached_auth("valid-token")
 
@@ -130,7 +133,7 @@ class TestGetCachedAuth:
 
     def test_removes_and_returns_none_for_expired_token(self):
         """Test that expired cached tokens are removed and None returned."""
-        _token_cache["expired-token"] = ("user456", time.time() - 100)
+        _token_cache["expired-token"] = ("user456", "google", time.time() - 100)
 
         result = _get_cached_auth("expired-token")
 
@@ -354,8 +357,9 @@ class TestCacheToken:
         _cache_token("my-token", "user123")
 
         assert "my-token" in _token_cache
-        user_id, cache_until = _token_cache["my-token"]
+        user_id, auth_type, cache_until = _token_cache["my-token"]
         assert user_id == "user123"
+        assert auth_type == "google"
         assert cache_until > time.time()
         assert cache_until <= time.time() + _CACHE_DURATION_SECONDS + 1
 
@@ -409,7 +413,7 @@ class TestGetCachedIdinfo:
 
     def test_returns_idinfo_for_valid_cached_token(self):
         """Test returns idinfo dict for valid cached tokens."""
-        _token_cache["valid-token"] = ("user123", time.time() + 3600)
+        _token_cache["valid-token"] = ("user123", "google", time.time() + 3600)
 
         result = _get_cached_idinfo("valid-token")
 
@@ -418,7 +422,7 @@ class TestGetCachedIdinfo:
 
     def test_removes_and_returns_none_for_expired_token(self):
         """Test removes expired tokens and returns None."""
-        _token_cache["expired-token"] = ("user456", time.time() - 100)
+        _token_cache["expired-token"] = ("user456", "google", time.time() - 100)
 
         result = _get_cached_idinfo("expired-token")
 
@@ -542,7 +546,7 @@ class TestUserApiKeyAuth:
     async def test_returns_cached_auth(self):
         """Test returns cached auth without verification."""
         request = MockRequest()
-        _token_cache["cached-token"] = ("user123", time.time() + 3600)
+        _token_cache["cached-token"] = ("user123", "google", time.time() + 3600)
 
         result = await user_api_key_auth(request, "cached-token")
 
@@ -641,7 +645,7 @@ class TestVerifyGoogleToken:
     @pytest.mark.asyncio
     async def test_returns_cached_idinfo(self):
         """Test returns cached idinfo."""
-        _token_cache["cached-token"] = ("user123", time.time() + 3600)
+        _token_cache["cached-token"] = ("user123", "google", time.time() + 3600)
 
         result = await verify_google_token("cached-token")
 
@@ -732,3 +736,263 @@ class TestVerifyGoogleToken:
             result = await verify_google_token("no-sub-token")
 
         assert result is None
+
+
+# Tests for test auth mode functions
+class TestIsTestToken:
+    """Tests for _is_test_token function."""
+
+    def test_empty_string_is_not_test_token(self):
+        """Test that empty string returns False."""
+        assert _is_test_token("") is False
+
+    def test_jwt_is_not_test_token(self):
+        """Test that JWT format returns False."""
+        jwt = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.sig"
+        assert _is_test_token(jwt) is False
+
+    def test_short_token_is_not_test_token(self):
+        """Test that tokens shorter than 32 chars return False."""
+        assert _is_test_token("abcd1234") is False
+        assert _is_test_token("a" * 31) is False
+
+    def test_hex_string_is_test_token(self):
+        """Test that 64-char hex string is recognized as test token."""
+        hex_token = "c6d7c30dd742f4424c5a214cf5a6bd23838ad40bac177634b5667c1811f1814b"
+        assert _is_test_token(hex_token) is True
+
+    def test_alphanumeric_with_underscore_dash_is_test_token(self):
+        """Test that alphanumeric with underscores/dashes is recognized."""
+        token = "test_1b69e464-abcd-1234-5678-abcdef123456"
+        assert _is_test_token(token) is True
+
+    def test_token_with_special_chars_is_not_test_token(self):
+        """Test that tokens with special chars return False."""
+        assert _is_test_token("token@with#special$chars" + "a" * 20) is False
+
+
+class TestValidateTestToken:
+    """Tests for _validate_test_token function."""
+
+    def setup_method(self):
+        """Clear cache before each test."""
+        _token_cache.clear()
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_billing_url_not_configured(self, monkeypatch):
+        """Test returns (empty, False) when BILLING_API_URL is not set."""
+        monkeypatch.setattr("hooks.custom_auth.BILLING_API_URL", "")
+
+        user_id, is_valid = await _validate_test_token("test-token")
+
+        assert user_id == ""
+        assert is_valid is False
+
+    @pytest.mark.asyncio
+    async def test_returns_true_on_successful_validation(self, monkeypatch):
+        """Test returns (user_id, True) on successful billing validation."""
+        monkeypatch.setattr("hooks.custom_auth.BILLING_API_URL", "http://billing:8000")
+        monkeypatch.setattr("hooks.custom_auth.CIRIS_TEST_USER_ID", "test_user_123")
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"has_credit": True}
+
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_response
+
+        with patch("hooks.custom_auth._get_http_client", return_value=mock_client):
+            user_id, is_valid = await _validate_test_token("valid-test-token")
+
+        assert user_id == "test_user_123"
+        assert is_valid is True
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_no_credits(self, monkeypatch):
+        """Test returns (user_id, False) when user has no credits."""
+        monkeypatch.setattr("hooks.custom_auth.BILLING_API_URL", "http://billing:8000")
+        monkeypatch.setattr("hooks.custom_auth.CIRIS_TEST_USER_ID", "test_user_123")
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"has_credit": False}
+
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_response
+
+        with patch("hooks.custom_auth._get_http_client", return_value=mock_client):
+            user_id, is_valid = await _validate_test_token("valid-test-token")
+
+        assert user_id == "test_user_123"
+        assert is_valid is False
+
+    @pytest.mark.asyncio
+    async def test_returns_false_on_401(self, monkeypatch):
+        """Test returns (empty, False) on 401 unauthorized."""
+        monkeypatch.setattr("hooks.custom_auth.BILLING_API_URL", "http://billing:8000")
+
+        mock_response = MagicMock()
+        mock_response.status_code = 401
+
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_response
+
+        with patch("hooks.custom_auth._get_http_client", return_value=mock_client):
+            user_id, is_valid = await _validate_test_token("invalid-token")
+
+        assert user_id == ""
+        assert is_valid is False
+
+    @pytest.mark.asyncio
+    async def test_returns_false_on_timeout(self, monkeypatch):
+        """Test returns (empty, False) on timeout."""
+        import httpx
+
+        monkeypatch.setattr("hooks.custom_auth.BILLING_API_URL", "http://billing:8000")
+
+        mock_client = AsyncMock()
+        mock_client.post.side_effect = httpx.TimeoutException("Timeout")
+
+        with patch("hooks.custom_auth._get_http_client", return_value=mock_client):
+            user_id, is_valid = await _validate_test_token("test-token")
+
+        assert user_id == ""
+        assert is_valid is False
+
+
+class TestUserApiKeyAuthTestMode:
+    """Tests for user_api_key_auth with test auth mode."""
+
+    def setup_method(self):
+        """Clear cache before each test."""
+        _token_cache.clear()
+
+    @pytest.mark.asyncio
+    async def test_test_token_validated_when_test_mode_enabled(self, monkeypatch):
+        """Test that test tokens are validated via billing when test mode is enabled."""
+        monkeypatch.setattr("hooks.custom_auth.CIRIS_TEST_AUTH_ENABLED", True)
+        monkeypatch.setattr("hooks.custom_auth.BILLING_API_URL", "http://billing:8000")
+        monkeypatch.setattr("hooks.custom_auth.CIRIS_TEST_USER_ID", "test_user_456")
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"has_credit": True}
+
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_response
+
+        test_token = "c6d7c30dd742f4424c5a214cf5a6bd23838ad40bac177634b5667c1811f1814b"
+        request = MockRequest()
+
+        with patch("hooks.custom_auth._get_http_client", return_value=mock_client):
+            result = await user_api_key_auth(request, test_token)
+
+        assert result.api_key == "test:test_user_456"
+        assert result.user_id == "test_user_456"
+
+    @pytest.mark.asyncio
+    async def test_test_token_rejected_when_test_mode_disabled(self, monkeypatch):
+        """Test that test tokens fall through to Google auth when test mode is disabled."""
+        monkeypatch.setattr("hooks.custom_auth.CIRIS_TEST_AUTH_ENABLED", False)
+
+        test_token = "c6d7c30dd742f4424c5a214cf5a6bd23838ad40bac177634b5667c1811f1814b"
+        request = MockRequest()
+
+        # Mock Google auth to return a proper 401 instead of 500 (missing module)
+        mock_id_token = MagicMock()
+        mock_id_token.verify_oauth2_token.side_effect = Exception("Invalid token")
+        mock_requests = MagicMock()
+        mock_jwt = MagicMock()
+
+        with patch("hooks.custom_auth._import_google_auth", return_value=(mock_id_token, mock_requests, mock_jwt)):
+            with pytest.raises(MockProxyException) as exc_info:
+                await user_api_key_auth(request, test_token)
+
+        assert exc_info.value.code == 401
+
+    @pytest.mark.asyncio
+    async def test_invalid_test_token_raises_exception(self, monkeypatch):
+        """Test that invalid test tokens raise ProxyException."""
+        monkeypatch.setattr("hooks.custom_auth.CIRIS_TEST_AUTH_ENABLED", True)
+        monkeypatch.setattr("hooks.custom_auth.BILLING_API_URL", "http://billing:8000")
+
+        mock_response = MagicMock()
+        mock_response.status_code = 401
+
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_response
+
+        test_token = "invalid_test_token_" + "a" * 32
+        request = MockRequest()
+
+        with patch("hooks.custom_auth._get_http_client", return_value=mock_client):
+            with pytest.raises(MockProxyException) as exc_info:
+                await user_api_key_auth(request, test_token)
+
+        assert exc_info.value.code == 401
+        assert "test" in exc_info.value.message.lower()
+
+
+class TestVerifyToken:
+    """Tests for verify_token function with test auth mode."""
+
+    def setup_method(self):
+        """Clear cache before each test."""
+        _token_cache.clear()
+
+    @pytest.mark.asyncio
+    async def test_validates_test_token_when_enabled(self, monkeypatch):
+        """Test that verify_token validates test tokens when test mode is enabled."""
+        monkeypatch.setattr("hooks.custom_auth.CIRIS_TEST_AUTH_ENABLED", True)
+        monkeypatch.setattr("hooks.custom_auth.BILLING_API_URL", "http://billing:8000")
+        monkeypatch.setattr("hooks.custom_auth.CIRIS_TEST_USER_ID", "test_user_789")
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"has_credit": True}
+
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_response
+
+        test_token = "c6d7c30dd742f4424c5a214cf5a6bd23838ad40bac177634b5667c1811f1814b"
+
+        with patch("hooks.custom_auth._get_http_client", return_value=mock_client):
+            result = await verify_token(test_token)
+
+        assert result is not None
+        assert result["sub"] == "test_user_789"
+        assert result["_auth_type"] == "test"
+
+    @pytest.mark.asyncio
+    async def test_returns_none_for_invalid_test_token(self, monkeypatch):
+        """Test that verify_token returns None for invalid test tokens."""
+        monkeypatch.setattr("hooks.custom_auth.CIRIS_TEST_AUTH_ENABLED", True)
+        monkeypatch.setattr("hooks.custom_auth.BILLING_API_URL", "http://billing:8000")
+
+        mock_response = MagicMock()
+        mock_response.status_code = 401
+
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_response
+
+        test_token = "invalid_test_token_" + "a" * 32
+
+        with patch("hooks.custom_auth._get_http_client", return_value=mock_client):
+            result = await verify_token(test_token)
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_uses_cached_test_token(self, monkeypatch):
+        """Test that verify_token uses cached test tokens."""
+        monkeypatch.setattr("hooks.custom_auth.CIRIS_TEST_AUTH_ENABLED", True)
+
+        # Pre-cache a test token
+        test_token = "cached_test_token_" + "a" * 32
+        _cache_token(test_token, "cached_user", "test")
+
+        result = await verify_token(test_token)
+
+        assert result is not None
+        assert result["sub"] == "cached_user"
+        assert result["_auth_type"] == "test"
