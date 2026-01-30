@@ -1,22 +1,25 @@
 """
-Google ID Token verification for LiteLLM Proxy.
+OAuth ID Token verification for LiteLLM Proxy.
 
-Accepts: Authorization: Bearer {google_id_token}
-Verifies: Token signature against Google's public keys
-Extracts: User's Google ID (sub claim) for billing
+Supports both Google and Apple ID tokens:
+- Google: Authorization: Bearer {google_id_token}
+- Apple: Authorization: Bearer {apple_id_token}
+
+Verifies: Token signature against provider's public keys
+Extracts: User's ID (sub claim) for billing
 
 This replaces the simple numeric ID validation with proper JWT verification.
-The Google ID token is cryptographically signed by Google and cannot be forged.
+The ID tokens are cryptographically signed by the provider and cannot be forged.
 
-NOTE: Expiration checking is DISABLED. The Android app may send tokens that
-expired hours ago. We still verify the signature (token was issued by Google)
+NOTE: Expiration checking is DISABLED. Mobile apps may send tokens that
+expired hours ago. We still verify the signature (token was issued by provider)
 and audience (token was issued for our app). The user ID is stable and the
 billing service handles authorization.
 
 TEST AUTH MODE: When CIRIS_TEST_AUTH_ENABLED=true, the proxy also accepts
 opaque test tokens (hex strings). These are validated by calling CIRISBilling's
 /v1/billing/credits/check endpoint directly. This enables integration testing
-without Google OAuth infrastructure.
+without OAuth infrastructure.
 
 SECURITY NOTE: Auth failures are logged for debugging but MUST NOT include:
 - Full tokens (only format/length hints)
@@ -232,8 +235,21 @@ GOOGLE_CLIENT_ID_ANDROID = os.environ.get(
     "GOOGLE_CLIENT_ID_ANDROID",
     "265882853697-vqfv6ecjgc1ku7n6bm4hllg6csdiaild.apps.googleusercontent.com"
 )
-# All valid client IDs
+# All valid Google client IDs
 GOOGLE_CLIENT_IDS = [GOOGLE_CLIENT_ID_WEB, GOOGLE_CLIENT_ID_ANDROID]
+
+# Apple Sign-In configuration
+# iOS bundle ID (used as audience for Apple ID tokens)
+APPLE_CLIENT_ID = os.environ.get("APPLE_CLIENT_ID", "ai.ciris.mobile")
+# Additional Apple client IDs (comma-separated)
+APPLE_CLIENT_IDS_EXTRA = os.environ.get("APPLE_CLIENT_IDS", "")
+# All valid Apple bundle IDs
+APPLE_CLIENT_IDS = [APPLE_CLIENT_ID] + [x.strip() for x in APPLE_CLIENT_IDS_EXTRA.split(",") if x.strip()]
+
+# Apple public keys cache
+_apple_public_keys: dict[str, object] = {}
+_apple_keys_fetched_at: float = 0
+_APPLE_KEYS_CACHE_TTL = 3600  # Refresh keys every hour
 
 if CIRIS_TEST_AUTH_ENABLED:
     logger.warning("TEST AUTH MODE ENABLED - test tokens will be accepted")
@@ -637,19 +653,178 @@ def _try_decode_expired_token_silent(token: str, jwt_module, last_error: Excepti
     return None
 
 
+# ============================================================================
+# Apple Sign-In Token Verification
+# ============================================================================
+
+
+async def _fetch_apple_public_keys() -> None:
+    """Fetch and cache Apple's public keys for JWT verification."""
+    global _apple_keys_fetched_at
+
+    now = time.time()
+    if _apple_public_keys and (now - _apple_keys_fetched_at) < _APPLE_KEYS_CACHE_TTL:
+        return  # Keys are still fresh
+
+    try:
+        client = await _get_http_client()
+        response = await client.get(
+            "https://appleid.apple.com/auth/keys",
+            timeout=10.0,
+        )
+        response.raise_for_status()
+        keys_data = response.json()
+
+        # Import jwt algorithms for JWK parsing
+        import jwt
+        from jwt import algorithms
+
+        # Parse JWK keys into RSA public keys
+        _apple_public_keys.clear()
+        for key_dict in keys_data.get("keys", []):
+            kid = key_dict.get("kid")
+            if kid:
+                # Convert JWK to RSA public key
+                public_key = algorithms.RSAAlgorithm.from_jwk(key_dict)
+                _apple_public_keys[kid] = public_key
+
+        _apple_keys_fetched_at = now
+        logger.info("apple_public_keys_fetched key_count=%d", len(_apple_public_keys))
+
+    except Exception as e:
+        logger.error("apple_public_keys_fetch_failed error=%s", str(e)[:50])
+        # Don't clear existing keys on error - use stale keys if available
+        if not _apple_public_keys:
+            raise
+
+
+def _is_apple_token(token: str) -> bool:
+    """
+    Check if a token looks like an Apple ID token by inspecting the issuer.
+
+    Apple ID tokens have issuer "https://appleid.apple.com".
+    """
+    if not token or token.count(".") != 2:
+        return False
+
+    try:
+        import jwt
+        unverified = jwt.decode(token, options={"verify_signature": False})
+        return unverified.get("iss") == "https://appleid.apple.com"
+    except Exception:
+        return False
+
+
+async def _try_verify_apple_token(token: str) -> tuple[dict | None, Exception | None]:
+    """
+    Try to verify an Apple ID token.
+
+    Args:
+        token: The Apple ID token to verify
+
+    Returns:
+        Tuple of (idinfo dict if successful, last_error if failed)
+    """
+    import jwt
+
+    # Fetch Apple's public keys
+    try:
+        await _fetch_apple_public_keys()
+    except Exception as e:
+        return None, e
+
+    if not _apple_public_keys:
+        return None, ValueError("No Apple public keys available")
+
+    # Decode JWT header to get key ID (kid)
+    try:
+        unverified_header = jwt.get_unverified_header(token)
+        kid = unverified_header.get("kid")
+    except Exception as e:
+        return None, e
+
+    if not kid:
+        return None, ValueError("Token missing key ID (kid)")
+
+    # Find matching public key
+    public_key = _apple_public_keys.get(kid)
+    if not public_key:
+        # Keys might have rotated, try refreshing
+        global _apple_keys_fetched_at
+        _apple_keys_fetched_at = 0  # Force refresh
+        try:
+            await _fetch_apple_public_keys()
+            public_key = _apple_public_keys.get(kid)
+        except Exception:
+            pass
+
+        if not public_key:
+            return None, ValueError(f"Unknown key ID: {kid}")
+
+    # Try each bundle ID until one works
+    last_error = None
+    for bundle_id in APPLE_CLIENT_IDS:
+        try:
+            payload = jwt.decode(
+                token,
+                public_key,
+                algorithms=["RS256"],
+                audience=bundle_id,
+                issuer="https://appleid.apple.com",
+            )
+            return payload, None  # Success
+        except jwt.exceptions.InvalidAudienceError:
+            last_error = ValueError(f"Invalid audience for bundle ID {bundle_id}")
+            continue
+        except jwt.exceptions.ExpiredSignatureError as e:
+            last_error = e
+            break  # Token expired, try to decode without verification
+        except Exception as e:
+            last_error = e
+            break
+
+    return None, last_error
+
+
+def _try_decode_expired_apple_token_silent(token: str, last_error: Exception | None) -> dict | None:
+    """
+    Try to decode an expired Apple token without verification.
+
+    Args:
+        token: The token to decode
+        last_error: The error from verification (to check if expired)
+
+    Returns:
+        dict with claims if valid expired token, None otherwise
+    """
+    if not last_error or "expired" not in str(last_error).lower():
+        return None
+
+    try:
+        import jwt
+        unverified = jwt.decode(token, options={"verify_signature": False})
+        aud = unverified.get("aud")
+        iss = unverified.get("iss")
+        if aud in APPLE_CLIENT_IDS and iss == "https://appleid.apple.com":
+            return unverified
+    except Exception:
+        pass
+    return None
+
+
 async def verify_token(token: str) -> dict | None:
     """
     Verify an authentication token and return user info.
 
-    Supports both Google ID tokens (JWTs) and test tokens (opaque strings).
+    Supports Google ID tokens, Apple ID tokens, and test tokens.
     This is a reusable function for endpoints that need auth but aren't
     using LiteLLM's auth middleware (e.g., /v1/web/search).
 
     Args:
-        token: Google ID token (JWT) or test token (opaque string)
+        token: Google/Apple ID token (JWT) or test token (opaque string)
 
     Returns:
-        dict with 'sub' (user ID) and '_auth_type' ("google" or "test"),
+        dict with 'sub' (user ID) and '_auth_type' ("google", "apple", or "test"),
         or None if invalid
     """
     if not token:
@@ -667,6 +842,31 @@ async def verify_token(token: str) -> dict | None:
             _cache_token(token, user_id, "test")
             return {"sub": user_id, "_auth_type": "test"}
         return None
+
+    # Check if this is an Apple token
+    if _is_apple_token(token):
+        try:
+            idinfo, last_error = await _try_verify_apple_token(token)
+
+            # Handle expired tokens (still accept them)
+            if idinfo is None:
+                idinfo = _try_decode_expired_apple_token_silent(token, last_error)
+
+            if idinfo is None:
+                return None
+
+            # Validate user ID exists
+            user_id = idinfo.get("sub")
+            if not user_id:
+                return None
+
+            # Cache and return
+            _cache_token(token, user_id, "apple")
+            idinfo["_auth_type"] = "apple"
+            return idinfo
+
+        except Exception:
+            return None
 
     # Google OAuth: validate JWT tokens
     modules = _try_import_google_auth_silent()
@@ -709,9 +909,12 @@ async def user_api_key_auth(request: Request, api_key: str) -> UserAPIKeyAuth | 
     """
     Verify authentication token and extract user identity.
 
-    Supports two auth modes:
-    1. Google OAuth (default): Validates Google ID tokens (JWTs)
-    2. Test mode: Validates opaque test tokens via CIRISBilling
+    Supports three auth modes:
+    1. Google OAuth: Validates Google ID tokens (JWTs)
+    2. Apple Sign-In: Validates Apple ID tokens (JWTs)
+    3. Test mode: Validates opaque test tokens via CIRISBilling
+
+    Token type is auto-detected based on the JWT issuer claim.
 
     Args:
         request: The incoming FastAPI request object
@@ -737,7 +940,7 @@ async def user_api_key_auth(request: Request, api_key: str) -> UserAPIKeyAuth | 
             code=401,
         )
 
-    # Check cache first (avoids network call to Google or billing)
+    # Check cache first (avoids network call to Google/Apple or billing)
     cached_auth = _get_cached_auth(api_key)
     if cached_auth:
         return cached_auth
@@ -764,6 +967,52 @@ async def user_api_key_auth(request: Request, api_key: str) -> UserAPIKeyAuth | 
                 param="Authorization",
                 code=401,
             )
+
+    # Check if this is an Apple token
+    if _is_apple_token(api_key):
+        try:
+            idinfo, last_error = await _try_verify_apple_token(api_key)
+
+            # If verification failed, try handling as expired token
+            if idinfo is None and last_error:
+                idinfo = _try_decode_expired_apple_token_silent(api_key, last_error)
+                if idinfo is None:
+                    _log_auth_failure(
+                        token=api_key,
+                        error=last_error,
+                        reason="apple_verification_failed",
+                        request=request,
+                    )
+                    _handle_verification_error(last_error)
+
+            # Extract and validate user ID
+            user_id = _extract_user_id(idinfo)
+
+            # Cache the verified token
+            _cache_token(api_key, user_id, "apple")
+
+            # Return with apple:{user_id} format for billing callback compatibility
+            return UserAPIKeyAuth(
+                api_key=f"apple:{user_id}",
+                user_id=user_id,
+            )
+
+        except ProxyException as e:
+            _log_auth_failure(
+                token=api_key,
+                error=e,
+                reason=e.message[:50] if hasattr(e, "message") else "proxy_exception",
+                request=request,
+            )
+            raise
+        except Exception as e:
+            _log_auth_failure(
+                token=api_key,
+                error=e,
+                reason="apple_verification_failed",
+                request=request,
+            )
+            _handle_verification_error(e)
 
     # Google OAuth: validate JWT tokens
     id_token_module, google_requests, jwt_module = _import_google_auth()
