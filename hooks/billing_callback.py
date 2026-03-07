@@ -316,11 +316,25 @@ class CIRISBillingCallback(CustomLogger):
         """
         Parse the API key to extract OAuth provider and external ID.
 
-        Expected format: "google:{user_id}" or just "{user_id}"
+        Expected formats:
+        - "google:{user_id}" - Google OAuth (colon delimiter)
+        - "apple|{user_id}" - Apple Sign-In (pipe delimiter to avoid LiteLLM JWT detection)
+        - "test:{user_id}" - Test auth mode
+        - "{user_id}" - Legacy format, assumes Google OAuth
+
+        NOTE: Apple uses pipe delimiter because Apple user IDs have format like
+        "001234.abc.xyz" (3 dot-separated parts), which triggers LiteLLM's naive
+        JWT detection. Using colon would result in "apple:001234.abc.xyz" being
+        hashed as "hashed-jwt-xxx", breaking billing.
+
         Returns: (oauth_provider, external_id)
         """
         if not api_key:
             return DEFAULT_OAUTH_PROVIDER, ""
+
+        # Apple Sign-In: pipe delimiter to avoid JWT false positive
+        if api_key.startswith("apple|"):
+            return "oauth:apple", api_key[6:]  # Skip "apple|" prefix
 
         if api_key.startswith("google:"):
             return DEFAULT_OAUTH_PROVIDER, api_key[7:]  # Skip "google:" prefix

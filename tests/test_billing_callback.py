@@ -55,6 +55,30 @@ class TestParseUserKey:
         assert provider == "oauth:google"
         assert user_id == "user:with:colons"
 
+    def test_parse_apple_pipe_delimiter(self):
+        """Test parsing Apple Sign-In with pipe delimiter.
+
+        Apple user IDs have format like '001234.abc.xyz' (3 dot-separated parts).
+        Using colon delimiter would trigger LiteLLM's naive JWT detection since
+        'apple:001234.abc.xyz' has 3 parts when split by '.'.
+        We use pipe delimiter to avoid this: 'apple|001234.abc.xyz'
+        """
+        callback = CIRISBillingCallback()
+        provider, user_id = callback._parse_user_key("apple|001234.abcdef.7890")
+
+        assert provider == "oauth:apple"
+        assert user_id == "001234.abcdef.7890"
+
+    def test_parse_apple_real_format_user_id(self):
+        """Test parsing Apple user ID in realistic format."""
+        callback = CIRISBillingCallback()
+        # Real Apple user IDs look like: 001234.abc123def456.7890
+        apple_user_id = "001234.a1b2c3d4e5f6g7h8i9j0.9876"
+        provider, user_id = callback._parse_user_key(f"apple|{apple_user_id}")
+
+        assert provider == "oauth:apple"
+        assert user_id == apple_user_id
+
 
 class TestPreCallHook:
     """Tests for async_pre_call_hook method."""

@@ -991,9 +991,13 @@ async def user_api_key_auth(request: Request, api_key: str) -> UserAPIKeyAuth | 
             # Cache the verified token
             _cache_token(api_key, user_id, "apple")
 
-            # Return with apple:{user_id} format for billing callback compatibility
+            # Return with apple|{user_id} format for billing callback compatibility
+            # NOTE: Using pipe delimiter instead of colon because Apple user IDs
+            # have format like "001234.abc.xyz" (3 dot-separated parts), which
+            # triggers LiteLLM's naive JWT detection (is_jwt checks for 3 dots).
+            # "apple:001234.abc.xyz" gets hashed as a JWT, breaking billing.
             return UserAPIKeyAuth(
-                api_key=f"apple:{user_id}",
+                api_key=f"apple|{user_id}",
                 user_id=user_id,
             )
 
