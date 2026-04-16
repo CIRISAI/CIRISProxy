@@ -1,7 +1,10 @@
 # CIRISProxy - LiteLLM with Google ID Token Auth + CIRISBilling
 # Self-contained image with all hooks and SDK baked in
 
-FROM ghcr.io/berriai/litellm:main-latest
+# SECURITY: Pin to verified safe version after March 2026 supply chain attack
+# v1.82.7 and v1.82.8 were compromised. v1.83.0+ are post-incident verified clean.
+# See: https://docs.litellm.ai/blog/security-update-march-2026
+FROM ghcr.io/berriai/litellm:main-v1.83.0
 
 # Install dependencies
 RUN pip install --no-cache-dir google-auth>=2.0.0 httpx>=0.24.0

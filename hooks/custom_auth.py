@@ -414,9 +414,47 @@ def _import_google_auth():
         )
 
 
+def _is_key_error(error: Exception) -> bool:
+    """Check if an error indicates a key/signature verification issue."""
+    error_msg = str(error).lower()
+    key_error_indicators = [
+        "could not verify",
+        "signature",
+        "invalid token",
+        "verification failed",
+        "key",
+        "certificate",
+    ]
+    # Don't treat expiration or audience errors as key errors
+    if "expired" in error_msg or "audience" in error_msg:
+        return False
+    return any(indicator in error_msg for indicator in key_error_indicators)
+
+
+def _clear_google_certs_cache(id_token_module) -> None:
+    """
+    Clear Google's internal certificate cache to force refresh.
+
+    When Google rotates signing keys, the cached certificates become stale.
+    This forces the library to fetch fresh certificates on the next verification.
+    """
+    # Google's id_token module caches certs in _GOOGLE_OAUTH2_CERTS (TTLCache)
+    # This is a private attribute but necessary to force refresh on key rotation
+    if hasattr(id_token_module, "_GOOGLE_OAUTH2_CERTS"):
+        try:
+            id_token_module._GOOGLE_OAUTH2_CERTS.clear()
+            logger.info("google_certs_cache_cleared")
+        except Exception as e:
+            logger.warning("google_certs_cache_clear_failed error=%s", str(e)[:50])
+
+
 def _try_verify_token(api_key: str, id_token_module, google_requests) -> tuple[dict | None, Exception | None]:
     """
     Try to verify token against each valid client ID.
+
+    If verification fails with what looks like a key/signature error,
+    clears Google's certificate cache and retries once. This handles
+    Google key rotation without requiring a proxy restart.
 
     Args:
         api_key: The token to verify
@@ -428,23 +466,34 @@ def _try_verify_token(api_key: str, id_token_module, google_requests) -> tuple[d
     """
     idinfo = None
     last_error = None
+    retried = False
 
-    for client_id in GOOGLE_CLIENT_IDS:
-        try:
-            idinfo = id_token_module.verify_oauth2_token(
-                api_key,
-                google_requests.Request(),
-                client_id
-            )
-            return idinfo, None  # Success
-        except Exception as e:
-            last_error = e
-            error_msg = str(e).lower()
-            # If token expired, stop trying other client IDs
-            if "expired" in error_msg:
-                break
-            # For other errors (including audience mismatch), try next client ID
-            continue
+    for attempt in range(2):  # Max 2 attempts (original + 1 retry after cache clear)
+        for client_id in GOOGLE_CLIENT_IDS:
+            try:
+                idinfo = id_token_module.verify_oauth2_token(
+                    api_key,
+                    google_requests.Request(),
+                    client_id
+                )
+                return idinfo, None  # Success
+            except Exception as e:
+                last_error = e
+                error_msg = str(e).lower()
+                # If token expired, stop trying other client IDs
+                if "expired" in error_msg:
+                    return None, last_error
+                # For other errors (including audience mismatch), try next client ID
+                continue
+
+        # If we've already retried or this doesn't look like a key error, stop
+        if retried or not _is_key_error(last_error):
+            break
+
+        # Clear cache and retry - Google may have rotated keys
+        logger.info("google_verification_failed_retrying reason=possible_key_rotation")
+        _clear_google_certs_cache(id_token_module)
+        retried = True
 
     return None, last_error
 
