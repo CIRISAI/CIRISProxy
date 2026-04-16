@@ -1,0 +1,4 @@
+# file: /home/emoore/CIRISProxy/libs/cirislens/sdk/logshipper.py
+# hypothesis_version: 6.150.2
+
+[1.0, 5.0, 10.0, 300.0, 100, 200, 401, 403, 1024, 100000, '%(message)s', '1.1.0', 'Authorization', 'CIRISLENS_ENDPOINT', 'CIRISLENS_TOKEN', 'CRITICAL', 'Content-Type', 'DEBUG', 'ERROR', 'INFO', 'POST', 'WARNING', 'application/x-ndjson', 'args', 'asctime', 'attributes', 'backoff', 'backoff_delay', 'blocked_by_circuit', 'buffer_bytes', 'buffer_size', 'circuit', 'circuit_state', 'created', 'current_delay', 'dropped_count', 'error_count', 'event', 'exc_info', 'exc_text', 'failure_count', 'filename', 'funcName', 'last_error', 'level', 'levelname', 'levelno', 'lineno', 'logger', 'message', 'module', 'msecs', 'msg', 'n/a', 'name', 'pathname', 'process', 'processName', 'relativeCreated', 'request_id', 'sent_count', 'server_id', 'stack_info', 'state', 'thread', 'threadName', 'timestamp', 'totals', 'trace_id', 'user_id', 'utf-8']

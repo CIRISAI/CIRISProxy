@@ -1,0 +1,4 @@
+# file: /home/emoore/CIRISProxy/hooks/search_handler.py
+# hypothesis_version: 6.148.9
+
+[10.0, 30.0, 100, 200, 400, 401, 402, 500, 502, 2000, 'Accept', 'Accept-Encoding', 'BILLING_API_KEY', 'BILLING_API_URL', 'BRAVE_API_KEY', 'Content-Type', 'EXA_API_KEY', 'SEARCH_PROVIDER', 'X-API-Key', 'X-Subscription-Token', 'application/json', 'author', 'auto', 'brave', 'category', 'contents', 'count', 'description', 'detail', 'error', 'exa', 'excludeDomains', 'exclude_domains', 'external_id', 'gzip', 'highlights', 'idempotency_key', 'includeDomains', 'include_domains', 'maxCharacters', 'none', 'numResults', 'numSentences', 'oauth:google', 'oauth_provider', 'product_type', 'provider', 'publishedDate', 'published_date', 'q', 'query', 'requestId', 'request_id', 'resolvedSearchType', 'results', 'search_type', 'status_code', 'sub', 'summary', 'text', 'title', 'type', 'url', 'web', 'web_search', 'x-api-key']

@@ -1,0 +1,4 @@
+# file: /home/emoore/CIRISProxy/hooks/status_handler.py
+# hypothesis_version: 6.148.9
+
+[10.0, 400, 1000, 3000, '/health', 'Authorization', 'BILLING_API_KEY', 'BILLING_API_URL', 'BRAVE_API_KEY', 'Bearer ', 'Brave Search', 'CIRISBilling', 'CIRISPROXY_VERSION', 'GROQ_API_KEY', 'Groq', 'Internal error', 'OPENROUTER_API_KEY', 'OpenRouter', 'TOGETHER_API_KEY', 'Timeout', 'Together AI', 'URL not configured', 'X-Subscription-Token', 'auth_header', 'auth_prefix', 'billing', 'brave', 'check_params', 'check_path', 'check_url', 'checked_at', 'cirisproxy', 'count', 'degraded', 'env_key', 'env_url', 'error', 'groq', 'internal', 'latency_ms', 'llm', 'name', 'openrouter', 'operational', 'outage', 'provider', 'providers', 'q', 'search', 'service', 'status', 'test', 'together', 'type', 'unknown', 'version']

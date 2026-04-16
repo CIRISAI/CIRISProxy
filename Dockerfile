@@ -4,7 +4,9 @@
 # SECURITY: Pin to verified safe version after March 2026 supply chain attack
 # v1.82.7 and v1.82.8 were compromised. v1.83.0+ are post-incident verified clean.
 # See: https://docs.litellm.ai/blog/security-update-march-2026
-FROM ghcr.io/berriai/litellm:main-v1.83.0
+# Image is signed with cosign - verify with:
+#   cosign verify --key https://raw.githubusercontent.com/BerriAI/litellm/0112e53046018d726492c814b3644b7d376029d0/cosign.pub ghcr.io/berriai/litellm:v1.83.3-stable
+FROM ghcr.io/berriai/litellm:v1.83.3-stable
 
 # Install dependencies
 RUN pip install --no-cache-dir google-auth>=2.0.0 httpx>=0.24.0
