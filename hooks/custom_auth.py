@@ -725,7 +725,6 @@ async def _fetch_apple_public_keys() -> None:
         keys_data = response.json()
 
         # Import jwt algorithms for JWK parsing
-        import jwt
         from jwt import algorithms
 
         # Parse JWK keys into RSA public keys

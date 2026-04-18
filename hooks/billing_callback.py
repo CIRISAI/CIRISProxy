@@ -788,7 +788,7 @@ class CIRISBillingCallback(CustomLogger):
             "completion_tokens": usage_data["completion_tokens"],
         }
 
-        if retry_count > 0:
+        if (retry_count or 0) > 0:
             log_data["retry_count"] = retry_count
             log_data["previous_error"] = previous_error
             log_data["original_request_id"] = original_request_id[:8] if original_request_id else None
