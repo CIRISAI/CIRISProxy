@@ -10,7 +10,8 @@
 FROM ghcr.io/berriai/litellm:v1.83.10-stable
 
 # Install dependencies
-RUN pip install --no-cache-dir google-auth>=2.0.0 httpx>=0.24.0
+# v1.83.10-stable ships a venv without pip on PATH — bootstrap via ensurepip first
+RUN python -m ensurepip && python -m pip install --no-cache-dir google-auth>=2.0.0 httpx>=0.24.0
 
 # Create directories
 RUN mkdir -p /app/libs /app/hooks /app/logs
