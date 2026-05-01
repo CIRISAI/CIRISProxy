@@ -1,4 +1,4 @@
-name: Build and Deploy
+name: Build
 
 on:
   push:
@@ -69,82 +69,6 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment: production
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Setup SSH
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
-
-      - name: Sync config files to server
-        env:
-          HOST: ${{ secrets.DEPLOY_HOST }}
-          USER: ${{ secrets.DEPLOY_USER }}
-        run: |
-          ssh -i ~/.ssh/deploy_key ${USER}@${HOST} "mkdir -p /opt/cirisproxy"
-
-          # Sync only config files (not Dockerfile since image is pre-built)
-          rsync -avz \
-            --include='docker-compose.prod.yml' \
-            --include='litellm_config.yaml' \
-            --include='server.py' \
-            --include='hooks/***' \
-            --include='libs/***' \
-            --include='scripts/***' \
-            --include='nginx/***' \
-            --exclude='*' \
-            -e "ssh -i ~/.ssh/deploy_key" \
-            ./ ${USER}@${HOST}:/opt/cirisproxy/
-
-      - name: Deploy to server
-        env:
-          HOST: ${{ secrets.DEPLOY_HOST }}
-          USER: ${{ secrets.DEPLOY_USER }}
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # Pass token securely to remote server
-          ssh -i ~/.ssh/deploy_key ${USER}@${HOST} "echo '${GHCR_TOKEN}' | docker login ghcr.io -u ${{ github.actor }} --password-stdin"
-
-          ssh -i ~/.ssh/deploy_key ${USER}@${HOST} << 'ENDSSH'
-            set -e
-            cd /opt/cirisproxy
-
-            # Check if .env exists
-            if [ ! -f .env ]; then
-              echo "ERROR: .env not found"
-              echo "Run: cp .env.production .env && nano .env"
-              exit 1
-            fi
-
-            # Pull and deploy
-            docker compose -f docker-compose.prod.yml pull
-            docker compose -f docker-compose.prod.yml --env-file .env up -d
-
-            # Health check (with retry) - use docker exec since port isn't exposed to host
-            for i in 1 2 3 4 5; do
-              sleep 5
-              if docker exec ciris-proxy python -c "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')"; then
-                echo "Deployment successful!"
-                exit 0
-              fi
-              echo "Health check attempt $i failed, retrying..."
-            done
-
-            echo "Health check failed after 5 attempts"
-            docker compose -f docker-compose.prod.yml logs --tail=50
-            exit 1
-          ENDSSH
-
-      - name: Cleanup
-        if: always()
-        run: rm -f ~/.ssh/deploy_key
+# Deployment to production runs out-of-band via CIRISBridge Ansible:
+#   cd ~/CIRISBridge/ansible
+#   ansible-playbook -i inventory/production.yml playbooks/site.yml --tags proxy
