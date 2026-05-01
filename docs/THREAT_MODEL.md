@@ -115,32 +115,33 @@ The signature *is* verified at first attempt — only when it fails *with* an ex
 
 **Residual**: a leaked OAuth token from any time in history works. Severity is bounded by per-interaction credit-spend, not full account-takeover at the IdP layer.
 
-#### AV-4: Test-token bypass left enabled in production **[v0.2.0 P0 latent]**
+#### AV-4: Test-token bypass left enabled in production **[mitigated v0.2.0]**
 
 **Attack**: Operator misconfigures `CIRIS_TEST_AUTH_ENABLED=true` in production. Any 32+ char hex/alphanumeric token (`hooks/custom_auth.py:284-304`) is forwarded to CIRISBilling's `/v1/billing/credits/check` for validation. If CIRISBilling has a matching test auth path, the proxy returns `UserAPIKeyAuth(api_key="test:{user_id}", user_id=user_id)` and the request proceeds.
 
-**Mitigation in v0.2.0**: **None at the proxy layer.** The check is `os.environ.get("CIRIS_TEST_AUTH_ENABLED", "").lower() == "true"` (`hooks/custom_auth.py:222`). There is no environment / production cross-check (compare to CIRISBilling AV-14 which refuses to start if `CIRIS_TEST_AUTH_ENABLED=true` AND `environment=production` — that gate does not exist here).
+**Mitigation in v0.2.0**: **Startup-time fail-fast gate.** `hooks/custom_auth.py:228-236` raises `RuntimeError` at module import if `CIRIS_TEST_AUTH_ENABLED=true` AND `CIRIS_ENV=production`. The container fails to start, surfacing the misconfiguration loudly. `docker-compose.prod.yml:43` sets `CIRIS_ENV=production` by default, so any operator using the production compose file inherits the gate without further action.
 
-The defense-in-depth layer is CIRISBilling: the test-token validation only succeeds if CIRISBilling's own test-auth path is also enabled and the token matches. So a misconfigured proxy on its own is not enough — the operator must also misconfigure billing.
+**Secondary**: when test auth is enabled outside production, the module logs at CRITICAL level (`hooks/custom_auth.py:259-264`) including the synthetic user_id the fallback maps to. The previous `logger.warning` was too soft for an exposure of this shape.
 
-**Recommended hot-fix for v0.2.1**:
-- Add a startup validator that refuses to boot if `CIRIS_TEST_AUTH_ENABLED=true` AND `LITELLM_ENV=production` (or an equivalent operator-set gate). Mirror the pattern in `CIRISBilling/app/config.py:171-177`.
-- Log a CRITICAL line at startup whenever test auth is on, including the user_id it falls back to (currently `ciris_synthetic_canary` per `hooks/custom_auth.py:223`). The current `logger.warning("TEST AUTH MODE ENABLED")` (`hooks/custom_auth.py:255`) is too soft for an exposure-of-this-shape.
+**Defense-in-depth**: CIRISBilling's own test-auth gate must also be enabled for the validation to succeed. Both proxy and billing would have to be misconfigured for the exploit to land — and the proxy gate now refuses to start before billing is even contacted.
 
-**Residual until fix**: dual-misconfiguration (proxy + billing) needed for exploit; auditable in env logs.
+**Test coverage**: `tests/test_custom_auth.py::TestTestAuthProductionGate` (4 tests) — refuses prod+test, allows non-prod, allows unset env, allows prod without test.
 
-#### AV-5: LiteLLM master-key bypass of custom_auth **[v0.2.0 P0 verification needed]**
+**Residual**: an operator who sets `CIRIS_ENV=staging` (or any value other than `production`) AND enables test auth retains the test path. By design — staging is allowed to run the test auth flow for integration testing.
 
-**Attack**: A client sends `Authorization: Bearer {LITELLM_MASTER_KEY}` to `/v1/chat/completions`. Per LiteLLM's auth-precedence semantics, `general_settings.master_key` is checked *before* `custom_auth` is invoked. If a client somehow obtains the master key (env-leak, ops shell history, container-escape from a co-tenant), they bypass OAuth-token verification entirely and call any model with no credit gating.
+#### AV-5: LiteLLM master-key bypass of custom_auth **[verified not exploitable in v0.2.0]**
 
-**Mitigation in v0.2.0**: **None at the proxy layer beyond keeping the key secret.** `litellm_config.yaml:173` sets `master_key: "os.environ/LITELLM_MASTER_KEY"`. No documented isolation between client-facing routes and admin routes — both the chat-completions surface and the (disabled-by-NO_DOCS-but-still-routable) admin endpoints share the same master-key-bypass. The `DISABLE_ADMIN_UI=True` env (`docker-compose.prod.yml:44`) hides the UI, not the underlying routes.
+**Attack hypothesis**: A client sends `Authorization: Bearer {LITELLM_MASTER_KEY}` (or `X-LiteLLM-API-Key: {master_key}`) to `/v1/chat/completions`, hoping master-key auth runs *before* `custom_auth` and short-circuits the OAuth verification.
 
-**Recommended hardening for v0.2.1**:
-- **Verify** with the upstream LiteLLM source whether `custom_auth` runs *unconditionally* or only when master-key auth fails. If the master-key shortcuts custom_auth, this is a P0; if not, this is a non-issue.
-- Either way: rotate `LITELLM_MASTER_KEY` on every deploy via Ansible (so a leaked-from-old-build value goes stale within hours).
-- Consider running the master-key-required admin endpoints on a separate uvicorn instance bound to localhost / a network-isolated socket, with the public-facing instance configured without a master key at all.
+**Verified against `litellm==1.83.10` source**: `litellm/proxy/auth/user_api_key_auth.py:640-669` (`_user_api_key_auth_builder`) runs custom_auth **first** — if `user_custom_auth is not None`, it calls `await user_custom_auth(request, api_key)`, validates the response, and returns. Master-key handling lives further down the function and is only reached when custom_auth is `None`. With `general_settings.custom_auth: "custom_auth.user_api_key_auth"` set (`litellm_config.yaml:177`), the master-key path is structurally unreachable for client-facing routes.
 
-**Residual until verified**: latent admin-bypass risk; severity contingent on LiteLLM's auth ordering.
+The `X-LiteLLM-API-Key` header precedence (`user_api_key_auth.py:612-623`) supersedes `Authorization`, but the resolved api_key is then passed to *our* custom_auth — which would attempt to verify it as an OAuth token, fail, and raise `ProxyException(code=401)`. There is no path where a client request reaches the master-key check.
+
+**Mitigation**: by upstream auth ordering. Custom_auth always runs first. Master-key auth is the fallback when custom_auth is unset.
+
+**Residual**: master-key admin endpoints (e.g., `/key/generate`) still exist for ops use, but `DISABLE_ADMIN_UI=True` and `NO_DOCS=True` (`docker-compose.prod.yml:42-45`) hide them and the underlying routes typically require admin auth at the route layer. Admin-key leak is a real concern (AV-11 envelope), but does not cross into the client-facing chat-completions surface.
+
+**Verification recorded**: this AV was hypothesized as P0 in the v0.2.0 baseline draft. After reading upstream LiteLLM source, downgraded to "verified not exploitable" with the auth-ordering citation above. Re-verify on every LiteLLM bump that touches `proxy/auth/user_api_key_auth.py`.
 
 #### AV-6: LiteLLM JWT-detection collision **[fixed in v0.2.0]**
 
@@ -363,8 +364,8 @@ These vectors are deferred but tracked, mirroring CIRISBilling §3.7 and CIRISPe
 | AV-1 | Forged OAuth ID token | Provider public-key + audience + issuer verify | Token format classification logging | ✓ Mitigated | — |
 | AV-2 | Multi-client-id confused-deputy | aud-loop allowlist | (no `azp` check) | ⚠ Operator-config risk | v0.2.x |
 | AV-3 | Expired-token acceptance | Sig + audience verify even on expired tokens | Per-interaction credit gating limits damage | ⚠ P1 design point | v0.2.x — add max-age cap |
-| AV-4 | Test-auth left enabled in production | (env-var only; CIRISBilling cross-check) | Single-misconfig insufficient — billing must also misconfigure | **⚠ P0 latent** | **v0.2.1 hot-fix** |
-| AV-5 | LiteLLM master-key bypass of custom_auth | (none — depends on LiteLLM auth ordering) | Master key kept secret in env | **⚠ P0 verification needed** | **v0.2.1 verify + harden** |
+| AV-4 | Test-auth left enabled in production | Startup-time fail-fast: refuse boot if `CIRIS_TEST_AUTH_ENABLED=true` AND `CIRIS_ENV=production` | CIRISBilling cross-check; CRITICAL log on enable | **✓ Mitigated v0.2.0** | — |
+| AV-5 | LiteLLM master-key bypass of custom_auth | Upstream auth-ordering — custom_auth runs first and returns; master_key path unreachable when custom_auth set | Verified against `litellm==1.83.10` source | **✓ Verified not exploitable** | re-verify on litellm bumps |
 | AV-6 | LiteLLM JWT-detection collision | `apple\|{user_id}` pipe delimiter | Regression test | **✓ Mitigated v0.2.0** | — |
 | AV-7 | Token cache poisoning | Cache key is full token bytes | Cryptographic verify per token | ✓ Mitigated | — |
 | AV-8 | Charge replay | `idempotency_key=litellm:{interaction_id}` + UNIQUE in CIRISBilling | Per-interaction cache | ✓ Mitigated | — |
@@ -477,9 +478,9 @@ Risks CIRISProxy mitigates but cannot fully eliminate:
 ## 9. v0.2.0 Threat Posture Summary
 
 ```
-v0.2.0 P0 EXPOSURES (block release; in-production today)
-  ⚠ AV-4  Test-auth bypass left enabled in production    (no startup-time production gate)
-  ⚠ AV-5  LiteLLM master-key bypass of custom_auth       (verification needed against LiteLLM auth ordering)
+v0.2.0 P0 EXPOSURES — all closed in v0.2.0
+  ✓ AV-4  Test-auth bypass in production    (startup gate refuses boot when CIRIS_TEST_AUTH_ENABLED=true AND CIRIS_ENV=production)
+  ✓ AV-5  Master-key bypass of custom_auth  (verified not exploitable — custom_auth runs first per litellm 1.83.10 source)
 
 v0.2.0 P1 EXPOSURES (hot-fix in v0.2.1)
   ⚠ AV-3  Expired-token acceptance (no max-age cap)
@@ -504,6 +505,8 @@ v0.2.x TRACK
 
 DESIGN-DECISIONS-PER-MISSION (intentional, not defects)
   ✓ AV-1  OAuth provider public-key + audience + issuer verify
+  ✓ AV-4  Startup-time production gate on test auth
+  ✓ AV-5  Upstream auth-ordering verified — master_key unreachable when custom_auth set
   ✓ AV-6  apple| pipe delimiter for billing parse
   ✓ AV-7  Cache keyed on full token bytes
   ✓ AV-8  idempotency_key=litellm:{interaction_id}
@@ -526,4 +529,4 @@ This document is updated:
 - On every new auth provider (Apple Sign-In was added in v0.2.0; future: Veilid identity?): AV-1 / AV-2 / AV-3 review.
 - On every Veilid-migration milestone: posture-summary refresh against new transport assumptions.
 
-**Last updated**: 2026-05-01 (v0.2.0 baseline; AV-4 / AV-5 named as P0; AV-3 / AV-13 / AV-15 / AV-16 scoped as P1 hot-fixes for v0.2.1; AV-6 marked closed after the `apple|` delimiter fix in v0.2.0; OP-1 closed for CVE-2026-42208 by the 1.83.10 bump).
+**Last updated**: 2026-05-01 (v0.2.0 baseline; AV-4 closed by startup gate + `CIRIS_ENV=production` in prod compose; AV-5 verified not exploitable against `litellm==1.83.10` source — master_key path is unreachable when custom_auth is set; AV-3 / AV-13 / AV-15 / AV-16 scoped as P1 hot-fixes for v0.2.1; AV-6 marked closed after the `apple|` delimiter fix in v0.2.0; OP-1 closed for CVE-2026-42208 by the 1.83.10 bump).

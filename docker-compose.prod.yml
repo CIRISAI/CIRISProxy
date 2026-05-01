@@ -38,6 +38,9 @@ services:
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
       - LITELLM_LOG_LEVEL=${LITELLM_LOG_LEVEL:-INFO}
 
+      # Production gate (refuses to start if CIRIS_TEST_AUTH_ENABLED=true)
+      - CIRIS_ENV=production
+
       # Security: Disable docs/swagger in production
       - NO_DOCS=True
       - NO_REDOC=True

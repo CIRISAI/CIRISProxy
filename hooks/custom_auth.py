@@ -221,8 +221,19 @@ def _log_auth_failure(
 # When enabled, accepts opaque test tokens validated via CIRISBilling
 CIRIS_TEST_AUTH_ENABLED = os.environ.get("CIRIS_TEST_AUTH_ENABLED", "").lower() == "true"
 CIRIS_TEST_USER_ID = os.environ.get("CIRIS_TEST_USER_ID", "ciris_synthetic_canary")
+CIRIS_ENV = os.environ.get("CIRIS_ENV", "").lower()
 BILLING_API_URL = os.environ.get("BILLING_API_URL", "")
 BILLING_API_KEY = os.environ.get("BILLING_API_KEY", "")
+
+# Fail-fast gate (AV-4 in docs/THREAT_MODEL.md): refuse to start with test
+# auth enabled in production. Mirrors CIRISBilling's `environment=production`
+# gate. Either unset CIRIS_TEST_AUTH_ENABLED or set CIRIS_ENV != "production".
+if CIRIS_TEST_AUTH_ENABLED and CIRIS_ENV == "production":
+    raise RuntimeError(
+        "FATAL: CIRIS_TEST_AUTH_ENABLED=true is not allowed when CIRIS_ENV=production. "
+        "Test tokens bypass OAuth verification and must never be reachable from a "
+        "production deployment. Unset CIRIS_TEST_AUTH_ENABLED or change CIRIS_ENV."
+    )
 
 # Google OAuth Client IDs - both web and Android client IDs are valid audiences
 # Web client ID (used as audience for most ID tokens)
@@ -252,7 +263,12 @@ _apple_keys_fetched_at: float = 0
 _APPLE_KEYS_CACHE_TTL = 3600  # Refresh keys every hour
 
 if CIRIS_TEST_AUTH_ENABLED:
-    logger.warning("TEST AUTH MODE ENABLED - test tokens will be accepted")
+    logger.critical(
+        "TEST AUTH MODE ENABLED - test tokens accepted as user_id=%s (CIRIS_ENV=%s). "
+        "Never enable in production.",
+        CIRIS_TEST_USER_ID,
+        CIRIS_ENV or "unset",
+    )
 
 # Cache for verified tokens: token -> (user_id, auth_type, cache_until_timestamp)
 # This avoids re-verifying the same token on every request

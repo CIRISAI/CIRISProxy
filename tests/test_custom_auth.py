@@ -996,3 +996,66 @@ class TestVerifyToken:
         assert result is not None
         assert result["sub"] == "cached_user"
         assert result["_auth_type"] == "test"
+
+
+class TestTestAuthProductionGate:
+    """Verify the AV-4 startup-time gate refuses test auth in production."""
+
+    def test_refuses_to_import_when_test_auth_and_production(self, monkeypatch):
+        """Module import must raise when both flags are set."""
+        monkeypatch.setenv("CIRIS_TEST_AUTH_ENABLED", "true")
+        monkeypatch.setenv("CIRIS_ENV", "production")
+
+        # Force a fresh import so module-level checks run again
+        sys.modules.pop("hooks.custom_auth", None)
+
+        with pytest.raises(RuntimeError, match="CIRIS_TEST_AUTH_ENABLED=true is not allowed"):
+            import hooks.custom_auth  # noqa: F401
+
+        # Restore the module for other tests with the env vars cleared
+        sys.modules.pop("hooks.custom_auth", None)
+        monkeypatch.delenv("CIRIS_TEST_AUTH_ENABLED", raising=False)
+        monkeypatch.delenv("CIRIS_ENV", raising=False)
+        import hooks.custom_auth  # noqa: F401
+
+    def test_allows_test_auth_in_non_production(self, monkeypatch):
+        """Module import must succeed for non-production env values."""
+        monkeypatch.setenv("CIRIS_TEST_AUTH_ENABLED", "true")
+        monkeypatch.setenv("CIRIS_ENV", "staging")
+
+        sys.modules.pop("hooks.custom_auth", None)
+        import hooks.custom_auth as ca
+
+        assert ca.CIRIS_TEST_AUTH_ENABLED is True
+        assert ca.CIRIS_ENV == "staging"
+
+        sys.modules.pop("hooks.custom_auth", None)
+        import hooks.custom_auth  # noqa: F401
+
+    def test_allows_test_auth_with_unset_env(self, monkeypatch):
+        """Module import must succeed when CIRIS_ENV is unset (default dev/local)."""
+        monkeypatch.setenv("CIRIS_TEST_AUTH_ENABLED", "true")
+        monkeypatch.delenv("CIRIS_ENV", raising=False)
+
+        sys.modules.pop("hooks.custom_auth", None)
+        import hooks.custom_auth as ca
+
+        assert ca.CIRIS_TEST_AUTH_ENABLED is True
+        assert ca.CIRIS_ENV == ""
+
+        sys.modules.pop("hooks.custom_auth", None)
+        import hooks.custom_auth  # noqa: F401
+
+    def test_allows_production_without_test_auth(self, monkeypatch):
+        """Production env without test auth must boot fine."""
+        monkeypatch.delenv("CIRIS_TEST_AUTH_ENABLED", raising=False)
+        monkeypatch.setenv("CIRIS_ENV", "production")
+
+        sys.modules.pop("hooks.custom_auth", None)
+        import hooks.custom_auth as ca
+
+        assert ca.CIRIS_TEST_AUTH_ENABLED is False
+        assert ca.CIRIS_ENV == "production"
+
+        sys.modules.pop("hooks.custom_auth", None)
+        import hooks.custom_auth  # noqa: F401
