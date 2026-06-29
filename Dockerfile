@@ -7,8 +7,9 @@
 # CVE-2026-42208 (SQLi) affects 1.81.16 - 1.83.6 — must be >= 1.83.7
 # CVE-2026-49468 (auth bypass via Host Header Injection) affects < 1.84.0 — must be >= 1.84.0
 # Image is signed with cosign - verify with:
-#   cosign verify --key https://raw.githubusercontent.com/BerriAI/litellm/main/cosign.pub ghcr.io/berriai/litellm:v1.90.0-stable
-FROM ghcr.io/berriai/litellm:v1.90.0-stable
+#   cosign verify --key https://raw.githubusercontent.com/BerriAI/litellm/main/cosign.pub ghcr.io/berriai/litellm:v1.90.0
+# Note: -stable channel topped out at v1.83.14; v1.84+ are published without the suffix
+FROM ghcr.io/berriai/litellm:v1.90.0
 
 # Install dependencies
 RUN python -m ensurepip && python -m pip install --no-cache-dir google-auth>=2.0.0 httpx>=0.24.0
