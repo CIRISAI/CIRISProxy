@@ -5,12 +5,12 @@
 # v1.82.7 and v1.82.8 were compromised. v1.83.0+ are post-incident verified clean.
 # See: https://docs.litellm.ai/blog/security-update-march-2026
 # CVE-2026-42208 (SQLi) affects 1.81.16 - 1.83.6 — must be >= 1.83.7
+# CVE-2026-49468 (auth bypass via Host Header Injection) affects < 1.84.0 — must be >= 1.84.0
 # Image is signed with cosign - verify with:
-#   cosign verify --key https://raw.githubusercontent.com/BerriAI/litellm/main/cosign.pub ghcr.io/berriai/litellm:v1.83.10-stable
-FROM ghcr.io/berriai/litellm:v1.83.10-stable
+#   cosign verify --key https://raw.githubusercontent.com/BerriAI/litellm/main/cosign.pub ghcr.io/berriai/litellm:v1.90.0-stable
+FROM ghcr.io/berriai/litellm:v1.90.0-stable
 
 # Install dependencies
-# v1.83.10-stable ships a venv without pip on PATH — bootstrap via ensurepip first
 RUN python -m ensurepip && python -m pip install --no-cache-dir google-auth>=2.0.0 httpx>=0.24.0
 
 # Create directories

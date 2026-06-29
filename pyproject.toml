@@ -9,7 +9,8 @@ dependencies = [
     # v1.82.7 and v1.82.8 were compromised. v1.83.0+ are post-incident verified clean.
     # See: https://docs.litellm.ai/blog/security-update-march-2026
     # CVE-2026-42208 (SQLi) affects 1.81.16 - 1.83.6 — must be >= 1.83.7
-    "litellm==1.83.10",
+    # CVE-2026-49468 (auth bypass via Host Header Injection) affects < 1.84.0 — must be >= 1.84.0
+    "litellm==1.90.0",
     "httpx>=0.25.0",
 ]
 
