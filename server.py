@@ -34,7 +34,8 @@ def add_custom_routes(app: FastAPI) -> None:
         Returns health status for all CIRISProxy providers:
         - LLM: OpenRouter, Groq, Together AI
         - Billing: CIRISBilling
-        - Search: Brave Search
+
+        Metered search APIs are monitored passively, not probed here.
         """
         try:
             status = await get_status()

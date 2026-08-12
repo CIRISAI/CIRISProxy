@@ -4,9 +4,11 @@ Status Endpoint for CIRISProxy
 Exposes /v1/status with health checks for all providers:
 - LLM Providers: OpenRouter, Groq, Together AI
 - Billing: CIRISBilling API
-- Search: Brave Search API
 
-Returns standardized status response for CIRISLens aggregation.
+Search providers are deliberately NOT checked here — see the note above
+PROVIDERS.
+
+Returns standardized status response for the ciris-status aggregator.
 """
 
 import asyncio
@@ -35,6 +37,20 @@ LATENCY_DEGRADED = 3000
 AUTH_PREFIX_BEARER = "Bearer "
 
 # Provider configurations
+#
+# DO NOT add a metered search API (Brave, Exa) here. The check this module
+# performs is a real, billable request — the Brave entry issued a live
+# `/res/v1/web/search?q=test` with the subscription token on every uncached
+# /v1/status call, and Brave bills per request since it dropped its free tier.
+# Disabling the key to stop that spend did not stop the probe: an unconfigured
+# provider reports `outage`, which made this service permanently `degraded`,
+# which made both regions degraded on ciris.ai's public status page and cost
+# ~27 points of published uptime for an outage that never happened.
+#
+# Search health is monitored PASSIVELY instead — derived from the real search
+# traffic in `hooks/search_handler.py`, which is already paid for and is a
+# truer signal (it reflects whether the key and quota actually work). See
+# CIRISStatus README, "Monitoring billable providers — the right way".
 PROVIDERS = {
     "openrouter": {
         "name": "OpenRouter",
@@ -67,15 +83,6 @@ PROVIDERS = {
         "env_key": "BILLING_API_KEY",
         "env_url": "BILLING_API_URL",
         "check_path": "/health",
-    },
-    "brave": {
-        "name": "Brave Search",
-        "type": "search",
-        "check_url": "https://api.search.brave.com/res/v1/web/search",
-        "check_params": {"q": "test", "count": 1},
-        "env_key": "BRAVE_API_KEY",
-        "auth_header": "X-Subscription-Token",
-        "auth_prefix": "",
     },
 }
 
