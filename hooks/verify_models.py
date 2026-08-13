@@ -30,13 +30,13 @@ import os
 import sys
 
 import httpx
-import yaml
 
 from hooks.model_audit import (
     audit_models,
     extract_available_models,
     find_dangling_fallbacks,
     load_configured_models,
+    read_config,
     resolve_config_path,
 )
 from hooks.status_handler import PROVIDERS
@@ -97,11 +97,9 @@ async def run(config_path: str | None) -> list[dict]:
 
 def report_fallbacks(config_path: str) -> bool:
     """Report fallback chains pointing at undefined aliases. True if any found."""
-    try:
-        with open(config_path, "r") as f:
-            config = yaml.safe_load(f) or {}
-    except (OSError, yaml.YAMLError) as e:
-        print(f"  ?  fallback chains: skipped — {e}")
+    config = read_config(config_path)
+    if config is None:
+        print("  ?  fallback chains: skipped — config could not be read")
         return False
 
     dangling = find_dangling_fallbacks(config)
@@ -161,8 +159,7 @@ def main() -> int:
     results = asyncio.run(run(resolved))
 
     if args.json:
-        with open(resolved, "r") as f:
-            dangling = find_dangling_fallbacks(yaml.safe_load(f) or {})
+        dangling = find_dangling_fallbacks(read_config(resolved) or {})
         print(json.dumps({"providers": results, "dangling_fallbacks": dangling}, indent=2))
         return 1 if _has_missing(results) or dangling else 0
 

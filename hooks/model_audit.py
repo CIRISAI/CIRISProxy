@@ -56,17 +56,64 @@ DEFAULT_PROVIDER = "openai"
 _config_cache: dict[str, dict[str, dict[str, list[str]]]] = {}
 
 
+# A config path can arrive from a CLI argument or an environment variable, and
+# it ends up as an argument to open(). Only ever accept a real, existing YAML
+# file: symlinks are resolved so the extension check cannot be bypassed by
+# pointing a .yaml symlink at something else, and directories, devices and
+# sockets are rejected outright. This module reads LiteLLM configs — there is
+# no legitimate call that needs anything else.
+_CONFIG_SUFFIXES = (".yaml", ".yml")
+
+
+def _validated_config_path(candidate: str | None) -> str | None:
+    """Canonicalize a candidate path, or None if it is not a readable YAML file."""
+    if not candidate:
+        return None
+
+    resolved = os.path.realpath(candidate)
+    if not resolved.endswith(_CONFIG_SUFFIXES):
+        return None
+    if not os.path.isfile(resolved):
+        return None
+    return resolved
+
+
 def resolve_config_path(path: str | None = None) -> str | None:
-    """Find the active LiteLLM config. Returns None if none exists."""
+    """
+    Find the active LiteLLM config, validated and canonicalized.
+
+    Returns None when no candidate resolves to an existing YAML file — callers
+    treat that as "not audited", never as a failure.
+    """
     if path:
-        return path if os.path.exists(path) else None
+        return _validated_config_path(path)
 
     env_path = os.environ.get(_CONFIG_PATH_ENV)
     candidates = (env_path, *_CONFIG_FALLBACKS) if env_path else _CONFIG_FALLBACKS
     for candidate in candidates:
-        if candidate and os.path.exists(candidate):
-            return candidate
+        validated = _validated_config_path(candidate)
+        if validated:
+            return validated
     return None
+
+
+def read_config(path: str | None = None) -> dict | None:
+    """
+    Read and parse a LiteLLM config.
+
+    The single place in this codebase that opens a config file: every caller
+    goes through here, so path validation cannot be skipped by adding another
+    reader. Returns None when the file cannot be read or parsed.
+    """
+    resolved = resolve_config_path(path)
+    if not resolved:
+        return None
+
+    try:
+        with open(resolved) as f:
+            return yaml.safe_load(f) or {}
+    except (OSError, yaml.YAMLError):
+        return None
 
 
 def split_model_string(model: str) -> tuple[str, str]:
@@ -124,13 +171,11 @@ def load_configured_models(path: str | None = None) -> dict[str, dict[str, list[
     if resolved in _config_cache:
         return _config_cache[resolved]
 
-    try:
-        with open(resolved, "r") as f:
-            config = yaml.safe_load(f) or {}
-        configured = parse_configured_models(config)
-    except (OSError, yaml.YAMLError):
+    config = read_config(resolved)
+    if config is None:
         return {}
 
+    configured = parse_configured_models(config)
     _config_cache[resolved] = configured
     return configured
 

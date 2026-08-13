@@ -21,6 +21,7 @@ from hooks.model_audit import (
     find_dangling_fallbacks,
     load_configured_models,
     parse_configured_models,
+    read_config,
     resolve_config_path,
     split_model_string,
 )
@@ -276,10 +277,87 @@ class TestConfigLoading:
         config_file = tmp_path / "config.yaml"
         config_file.write_text("model_list: []\n")
 
-        assert resolve_config_path(str(config_file)) == str(config_file)
+        assert resolve_config_path(str(config_file)) == os.path.realpath(config_file)
 
     def test_resolve_missing_explicit_path(self, tmp_path):
         assert resolve_config_path(str(tmp_path / "nope.yaml")) is None
+
+    @pytest.mark.parametrize("name", ["config.yaml", "config.yml"])
+    def test_accepts_both_yaml_suffixes(self, tmp_path, name):
+        config_file = tmp_path / name
+        config_file.write_text("model_list: []\n")
+
+        assert resolve_config_path(str(config_file)) is not None
+
+    def test_rejects_non_yaml_file(self, tmp_path):
+        """A config loader has no business opening arbitrary files."""
+        secret = tmp_path / "id_rsa"
+        secret.write_text("not a config\n")
+
+        assert resolve_config_path(str(secret)) is None
+
+    def test_rejects_directory(self, tmp_path):
+        directory = tmp_path / "conf.yaml"
+        directory.mkdir()
+
+        assert resolve_config_path(str(directory)) is None
+
+    def test_symlink_cannot_disguise_a_non_yaml_target(self, tmp_path):
+        """Realpath first, then check the suffix — otherwise the check is bypassable."""
+        target = tmp_path / "secrets.env"
+        target.write_text("KEY=value\n")
+        link = tmp_path / "config.yaml"
+        link.symlink_to(target)
+
+        assert resolve_config_path(str(link)) is None
+
+    def test_traversal_resolves_to_the_real_target(self, tmp_path):
+        """`..` segments are normalized, so the suffix check sees the real path."""
+        nested = tmp_path / "nested"
+        nested.mkdir()
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("model_list: []\n")
+
+        traversed = str(nested / ".." / "config.yaml")
+        assert resolve_config_path(traversed) == os.path.realpath(config_file)
+
+    def test_env_var_path_is_validated_too(self, tmp_path, monkeypatch):
+        """LITELLM_CONFIG_PATH goes through the same gate as --config."""
+        secret = tmp_path / "id_rsa"
+        secret.write_text("not a config\n")
+        monkeypatch.setenv("LITELLM_CONFIG_PATH", str(secret))
+
+        # Falls through to the repo config rather than opening the named file.
+        resolved = resolve_config_path()
+        assert resolved != os.path.realpath(secret)
+
+
+class TestReadConfig:
+    """read_config is the only place a config file is opened."""
+
+    def test_reads_and_parses(self, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(yaml.safe_dump({"model_list": [{"model_name": "a"}]}))
+
+        assert read_config(str(config_file)) == {"model_list": [{"model_name": "a"}]}
+
+    def test_empty_file_is_an_empty_config(self, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("")
+
+        assert read_config(str(config_file)) == {}
+
+    def test_rejected_path_returns_none(self, tmp_path):
+        secret = tmp_path / "id_rsa"
+        secret.write_text("KEY=value\n")
+
+        assert read_config(str(secret)) is None
+
+    def test_malformed_yaml_returns_none(self, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("model_list: [unclosed\n")
+
+        assert read_config(str(config_file)) is None
 
     def test_resolve_falls_back_to_repo_config(self):
         """A source checkout resolves without any env var set."""
