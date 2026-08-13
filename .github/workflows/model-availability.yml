@@ -1,0 +1,143 @@
+name: Model Availability
+
+# Providers retire models without notice. Groq dropped llama-4-scout and
+# llama-4-maverick, and Together dropped the Maverick FP8 build, while all
+# three were still named in our routing chain — including the third hop of the
+# default chain, which would only have surfaced during a primary outage, when
+# the fallback was needed and no longer existed.
+#
+# A PR gate cannot catch that: the config does not change when a provider
+# retires a model. The world changes underneath a config that is still correct
+# as written. So this runs on a schedule against the real keys and opens an
+# issue when the audit fails.
+
+on:
+  schedule:
+    # 07:00 UTC daily — early enough to act on during the working day.
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: model-availability
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write # files/updates the alert issue
+
+jobs:
+  audit:
+    name: audit configured models
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - run: pip install --upgrade pip && pip install -e ".[dev]"
+
+      # Only free /models listings are queried — never a metered inference or
+      # search endpoint. See the PROVIDERS note in hooks/status_handler.py for
+      # why that distinction is load-bearing here.
+      - name: Audit configured models against provider listings
+        id: audit
+        env:
+          DEEPINFRA_API_KEY: ${{ secrets.DEEPINFRA_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          TOGETHER_API_KEY: ${{ secrets.TOGETHER_API_KEY }}
+        run: |
+          set -o pipefail
+          # Capture the report for the issue body regardless of exit status.
+          if python -m hooks.verify_models 2>&1 | tee report.txt; then
+            echo "failed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "failed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # One open issue, updated in place. A new issue every morning for the
+      # same retirement is noise that gets muted, and a muted alert is no alert.
+      - name: Open or update the alert issue
+        if: steps.audit.outputs.failed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('report.txt', 'utf8');
+            const title = 'Configured model no longer served by its provider';
+            const body = [
+              'The daily model availability audit failed. A model named in',
+              '`litellm_config.yaml` is no longer served by its provider, so any',
+              'route or fallback pointing at it will fail when it is next used.',
+              '',
+              '```',
+              report.trim(),
+              '```',
+              '',
+              `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              '',
+              'Reproduce locally with `python -m hooks.verify_models`.',
+            ].join('\n');
+
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'model-availability',
+            });
+
+            if (existing.data.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.data[0].number,
+                body: `Still failing as of this run.\n\n${body}`,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['model-availability'],
+              });
+            }
+
+      # Close the loop: a fixed config should not leave a stale alert open.
+      - name: Close the alert issue when the audit passes
+        if: steps.audit.outputs.failed == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'model-availability',
+            });
+            for (const issue of existing.data) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: 'Audit is passing again — every configured model is available. Closing.',
+              });
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                state: 'closed',
+              });
+            }
+
+      - name: Fail the run when models are missing
+        if: steps.audit.outputs.failed == 'true'
+        run: |
+          echo "::error::configured models are missing upstream — see the report above"
+          exit 1
