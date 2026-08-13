@@ -1,0 +1,204 @@
+name: CI
+
+# ruff + pytest(coverage gate) + config audit + image runtime smoke.
+#
+# Structure follows CIRISStatus's ci.yml: concurrency-cancel, least-privilege
+# permissions, a cheap lint job that fails fast in parallel with the slower
+# ones, and an image smoke test that proves the artifact we publish actually
+# boots. Adapted for Python: ruff replaces fmt+clippy, pytest replaces cargo
+# test, and the model/config audit is this service's domain-specific gate.
+#
+# Also exposed as a reusable workflow so deploy.yml gates its publish on the
+# exact same jobs rather than maintaining a second, drifting copy.
+
+on:
+  pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+  workflow_dispatch:
+  workflow_call:
+
+# Deliberately NOT triggered by push to main: deploy.yml calls this workflow as
+# its publish gate on every main push. A `push` trigger here would run the same
+# jobs a second time on the same commit AND land in this same concurrency
+# group, where cancel-in-progress would let one run kill the other — including
+# the one gating the publish.
+
+# Cancel a superseded run on the same ref (PR re-push).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - run: pip install --upgrade pip && pip install -e ".[dev]"
+
+      # ruff was in pyproject and in CLAUDE.md's dev instructions but never in
+      # CI, so 200 violations accumulated unnoticed. Non-negotiable now.
+      - name: ruff check
+        run: ruff check .
+
+  test:
+    name: pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - run: pip install --upgrade pip && pip install -e ".[dev]"
+
+      # --cov-fail-under is a ratchet, not a target: it sits just below the
+      # current figure so coverage cannot silently regress, and it gets raised
+      # as coverage rises. Never lower it to make a red build green.
+      - name: pytest with coverage gate
+        run: |
+          pytest tests/ \
+            --cov=hooks \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml \
+            --cov-fail-under=75
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          retention-days: 7
+
+  config-audit:
+    name: config audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - run: pip install --upgrade pip && pip install -e ".[dev]"
+
+      # Audits litellm_config.yaml against each provider's live /models
+      # listing, and checks that no fallback chain names an undefined alias.
+      #
+      # Secrets are OPTIONAL here by design. DeepInfra and OpenRouter publish
+      # their model lists unauthenticated, so this gate has teeth even on a
+      # fork PR with no secrets; Groq and Together report `skipped` rather than
+      # failing (an audit we could not perform is not a defect we found). The
+      # scheduled run in model-availability.yml is the authoritative one.
+      #
+      # /models endpoints are free. Nothing here touches a metered inference or
+      # search endpoint — see the PROVIDERS note in hooks/status_handler.py.
+      - name: Verify configured models still exist upstream
+        env:
+          DEEPINFRA_API_KEY: ${{ secrets.DEEPINFRA_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          TOGETHER_API_KEY: ${{ secrets.TOGETHER_API_KEY }}
+        run: python -m hooks.verify_models
+
+  image-runtime-smoke:
+    name: image runtime smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build the runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: cirisproxy:smoke
+          cache-from: type=gha,scope=proxy-amd64
+          cache-to: type=gha,mode=max,scope=proxy-amd64
+
+      # The image flattens hooks/ into /app, so every hook module must be named
+      # in the Dockerfile individually. Adding a module and forgetting its COPY
+      # line yields an image that imports fine in CI and crash-loops in
+      # production — exactly the gap this step closes.
+      - name: Every hook module must import inside the image
+        run: |
+          set -o pipefail
+          docker run --rm --entrypoint python cirisproxy:smoke -c "
+          import pathlib, importlib, sys
+          expected = sorted(
+              p.stem for p in pathlib.Path('/app').glob('*.py')
+              if p.stem not in {'preprocess_config', 'healthcheck'}
+          )
+          print('modules in image:', expected)
+          for name in ['billing_callback', 'custom_auth', 'search_handler',
+                       'status_handler', 'model_audit', 'server']:
+              importlib.import_module(name)
+              print(f'  ok {name}')
+          " 2>&1 | tee /tmp/imports.log
+          grep -q "ok status_handler" /tmp/imports.log \
+            || { echo "::error::hook modules failed to import in the image"; exit 1; }
+
+      # Boots the proxy and proves it serves. A missing COPY, a bad config, or
+      # an import error at route-registration time all present as a container
+      # that exits or never answers — none of which pytest can see.
+      - name: Boot smoke — the proxy must serve /v1/status/simple
+        env:
+          # Minimal env for boot. No real provider keys: the status endpoint
+          # reports them as unconfigured, which is a valid response, and the
+          # liveness route does not depend on them at all.
+          BOOT_ENV: >-
+            -e LITELLM_MASTER_KEY=sk-smoke
+            -e BILLING_API_URL=http://127.0.0.1:9
+            -e BILLING_API_KEY=smoke
+            -e GOOGLE_CLIENT_ID=smoke.apps.googleusercontent.com
+            -e CIRIS_LOG_FILE=/tmp/cirisproxy.log
+        run: |
+          docker run -d --name proxyboot -p 4000:4000 $BOOT_ENV cirisproxy:smoke
+          ok=0
+          for i in $(seq 1 40); do
+            if [ "$(docker inspect -f '{{.State.Running}}' proxyboot 2>/dev/null)" != "true" ]; then
+              echo "::error::container exited during boot (import or config failure)"
+              docker logs proxyboot 2>&1 | tail -60; exit 1
+            fi
+            if curl -sf -m3 http://127.0.0.1:4000/v1/status/simple 2>/dev/null | grep -q '"status":"ok"'; then
+              ok=1; break
+            fi
+            sleep 3
+          done
+          docker logs proxyboot 2>&1 | tail -30
+          docker rm -f proxyboot >/dev/null 2>&1 || true
+          [ "$ok" = 1 ] || { echo "::error::proxy never served /v1/status/simple within ~120s"; exit 1; }
+          echo "✅ boot smoke OK — proxy booted clean and served /v1/status/simple"

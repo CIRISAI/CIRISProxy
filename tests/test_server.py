@@ -4,14 +4,15 @@ Tests for server.py - Custom FastAPI endpoints.
 Uses FastAPI TestClient pattern from LiteLLM testing approach.
 """
 
-import sys
 import os
+import sys
 
 # Add hooks directory to path so server.py can find its imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "hooks"))
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
-from unittest.mock import patch, AsyncMock, MagicMock
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 

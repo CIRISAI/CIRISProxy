@@ -7,73 +7,38 @@ Uses LiteLLM testing patterns:
 - parametrize for multiple auth scenarios
 """
 
+import sys
 import time
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from hypothesis import given, strategies as st, settings
 
-# Mock the litellm imports before importing custom_auth
-import sys
-mock_litellm_types = MagicMock()
-mock_litellm_proxy = MagicMock()
-
-
-class MockUserAPIKeyAuth:
-    """Mock UserAPIKeyAuth for testing."""
-
-    def __init__(self, api_key: str, user_id: str):
-        self.api_key = api_key
-        self.user_id = user_id
-
-
-class MockProxyException(Exception):
-    """Mock ProxyException for testing."""
-
-    def __init__(self, message: str, type: str, param: str = None, code: int = 401):
-        self.message = message
-        self.type = type
-        self.param = param
-        self.code = code
-        super().__init__(message)
-
-
-class MockRequest:
-    """Mock FastAPI Request for testing."""
-
-    def __init__(self):
-        self.headers = {}
-
-
-mock_litellm_types.UserAPIKeyAuth = MockUserAPIKeyAuth
-mock_litellm_proxy.ProxyException = MockProxyException
-
-sys.modules["litellm.proxy._types"] = mock_litellm_types
-sys.modules["litellm.proxy.proxy_server"] = mock_litellm_proxy
-
-# Now import the module
 from hooks.custom_auth import (
-    _cleanup_cache,
-    _get_cached_auth,
-    _import_google_auth,
-    _try_verify_token,
-    _validate_expired_token_claims,
-    _handle_expired_token,
-    _extract_user_id,
-    _cache_token,
-    _handle_verification_error,
-    _get_cached_idinfo,
-    _try_import_google_auth_silent,
-    _try_decode_expired_token_silent,
-    _is_test_token,
-    _validate_test_token,
-    _token_cache,
     _CACHE_DURATION_SECONDS,
     GOOGLE_CLIENT_IDS,
+    _cache_token,
+    _cleanup_cache,
+    _extract_user_id,
+    _get_cached_auth,
+    _get_cached_idinfo,
+    _handle_expired_token,
+    _handle_verification_error,
+    _import_google_auth,
+    _is_test_token,
+    _token_cache,
+    _try_decode_expired_token_silent,
+    _try_import_google_auth_silent,
+    _try_verify_token,
+    _validate_expired_token_claims,
+    _validate_test_token,
     user_api_key_auth,
     verify_google_token,
     verify_token,
 )
+
+# The litellm.proxy stubs these depend on are installed by conftest.py, which
+# pytest loads before this module. See tests/litellm_stubs.py.
+from tests.litellm_stubs import MockProxyException, MockRequest
 
 
 class TestCleanupCache:

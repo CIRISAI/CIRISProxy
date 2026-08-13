@@ -9,29 +9,33 @@ Uses:
 
 import os
 import time
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import httpx
 import pytest
 import respx
-from hypothesis import given, strategies as st, settings
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from hooks.status_handler import (
-    _init_provider_result,
-    _get_api_key,
-    _build_check_url,
+    POOLS,
+    PROVIDERS,
+    ROLE_FALLBACK,
+    ROLE_PRIMARY,
+    STATUS_DEGRADED,
+    STATUS_OPERATIONAL,
+    STATUS_OUTAGE,
+    STATUS_UNKNOWN,
     _build_auth_headers,
+    _build_check_url,
     _evaluate_response,
+    _get_api_key,
+    _init_provider_result,
+    _summarize_pool,
+    _worst,
     check_provider,
     get_status,
-    STATUS_OPERATIONAL,
-    STATUS_DEGRADED,
-    STATUS_OUTAGE,
-    LATENCY_GOOD,
-    LATENCY_DEGRADED,
-    PROVIDERS,
 )
-
 
 # =============================================================================
 # Helper Function Tests
@@ -364,3 +368,395 @@ class TestGetStatus:
         result = await get_status()
 
         assert result == sh._status_cache
+
+
+# =============================================================================
+# Model Audit Integration Tests
+# =============================================================================
+
+
+class TestModelAuditIntegration:
+    """The health probe's /models body is reused to audit configured models."""
+
+    @pytest.fixture
+    def groq_config(self):
+        return PROVIDERS["groq"]
+
+    @staticmethod
+    def _models_response(*ids):
+        return httpx.Response(200, json={"data": [{"id": i} for i in ids]})
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_missing_model_degrades_provider(self):
+        """Reachable but no longer serving what we route there — the Groq case."""
+        respx.get(PROVIDERS["groq"]["check_url"]).mock(
+            return_value=self._models_response("qwen/qwen3.6-27b")
+        )
+
+        with patch.dict(os.environ, {"GROQ_API_KEY": "secret"}), patch(
+            "hooks.status_handler.load_configured_models",
+            return_value={
+                "groq": {
+                    "qwen/qwen3.6-27b": ["fast"],
+                    "meta-llama/llama-4-scout-17b-16e-instruct": ["llama-4-scout"],
+                }
+            },
+        ):
+            async with httpx.AsyncClient() as client:
+                result = await check_provider(client, "groq", PROVIDERS["groq"])
+
+        assert result["status"] == STATUS_DEGRADED
+        assert result["models"]["available"] == 1
+        assert result["models"]["missing"][0]["aliases"] == ["llama-4-scout"]
+        assert "llama-4-scout-17b-16e-instruct" in result["error"]
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_all_models_present_stays_operational(self):
+        respx.get(PROVIDERS["groq"]["check_url"]).mock(
+            return_value=self._models_response("qwen/qwen3.6-27b")
+        )
+
+        with patch.dict(os.environ, {"GROQ_API_KEY": "secret"}), patch(
+            "hooks.status_handler.load_configured_models",
+            return_value={"groq": {"qwen/qwen3.6-27b": ["fast"]}},
+        ):
+            async with httpx.AsyncClient() as client:
+                result = await check_provider(client, "groq", PROVIDERS["groq"])
+
+        assert result["status"] == STATUS_OPERATIONAL
+        assert result["models"] == {"configured": 1, "available": 1, "missing": []}
+        assert result["error"] is None
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_audit_never_upgrades_a_verdict(self):
+        """A slow provider stays degraded-for-latency even with all models present."""
+        respx.get(PROVIDERS["groq"]["check_url"]).mock(
+            return_value=self._models_response("qwen/qwen3.6-27b")
+        )
+
+        with patch.dict(os.environ, {"GROQ_API_KEY": "secret"}), patch(
+            "hooks.status_handler.load_configured_models",
+            return_value={"groq": {"qwen/qwen3.6-27b": ["fast"]}},
+        ), patch("hooks.status_handler._evaluate_response") as mock_eval:
+
+            def slow(result, latency_ms, status_code):
+                result["status"] = STATUS_DEGRADED
+                result["error"] = "High latency: 4000ms"
+
+            mock_eval.side_effect = slow
+
+            async with httpx.AsyncClient() as client:
+                result = await check_provider(client, "groq", PROVIDERS["groq"])
+
+        assert result["status"] == STATUS_DEGRADED
+        assert result["error"] == "High latency: 4000ms"
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_unparseable_body_is_not_a_failure(self):
+        """We must not invent an outage from a body we could not read."""
+        respx.get(PROVIDERS["groq"]["check_url"]).mock(
+            return_value=httpx.Response(200, text="not json")
+        )
+
+        with patch.dict(os.environ, {"GROQ_API_KEY": "secret"}), patch(
+            "hooks.status_handler.load_configured_models",
+            return_value={"groq": {"qwen/qwen3.6-27b": ["fast"]}},
+        ):
+            async with httpx.AsyncClient() as client:
+                result = await check_provider(client, "groq", PROVIDERS["groq"])
+
+        assert result["status"] == STATUS_OPERATIONAL
+        assert "models" not in result
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_billing_is_not_model_audited(self):
+        """Non-LLM dependencies have no model list to audit."""
+        respx.get("https://billing.test.com/health").mock(
+            return_value=httpx.Response(200, json={"data": [{"id": "x"}]})
+        )
+
+        env = {"BILLING_API_KEY": "secret", "BILLING_API_URL": "https://billing.test.com"}
+        with patch.dict(os.environ, env):
+            async with httpx.AsyncClient() as client:
+                result = await check_provider(client, "billing", PROVIDERS["billing"])
+
+        assert result["status"] == STATUS_OPERATIONAL
+        assert "models" not in result
+
+
+# =============================================================================
+# Provider Registry Tests
+# =============================================================================
+
+
+class TestProviderRegistry:
+    """The monitored set must match the serving set (issue #7)."""
+
+    def test_primary_provider_is_monitored(self):
+        """DeepInfra serves the default chain, so it must be checked."""
+        assert "deepinfra" in PROVIDERS
+        assert PROVIDERS["deepinfra"]["role"] == ROLE_PRIMARY
+
+    def test_exactly_one_primary_per_pool(self):
+        """A pool with two primaries (or none) makes `primary_available` meaningless."""
+        for pool_id in POOLS:
+            primaries = [
+                p for p in PROVIDERS.values()
+                if p["type"] == pool_id and p.get("role") == ROLE_PRIMARY
+            ]
+            assert len(primaries) == 1, f"pool {pool_id} has {len(primaries)} primaries"
+
+    def test_pooled_providers_declare_a_role(self):
+        """Every pool member carries primary/fallback; non-pooled deps do not."""
+        for provider_id, config in PROVIDERS.items():
+            if config["type"] in POOLS:
+                assert config.get("role") in (ROLE_PRIMARY, ROLE_FALLBACK), provider_id
+            else:
+                assert config.get("role") is None, provider_id
+
+    def test_no_metered_search_provider(self):
+        """Regression guard for PR #6 — search APIs bill per probe."""
+        assert not any(c["type"] == "search" for c in PROVIDERS.values())
+
+
+# =============================================================================
+# Rollup Tests
+# =============================================================================
+
+
+def _member(provider_id, status, role=ROLE_FALLBACK, ptype="llm"):
+    """Build a provider result for rollup tests."""
+    return {"provider": provider_id, "type": ptype, "role": role, "status": status}
+
+
+class TestWorst:
+    """Tests for _worst severity ordering."""
+
+    @pytest.mark.parametrize(
+        "statuses,expected",
+        [
+            ([], STATUS_OPERATIONAL),
+            ([STATUS_OPERATIONAL], STATUS_OPERATIONAL),
+            ([STATUS_OPERATIONAL, STATUS_DEGRADED], STATUS_DEGRADED),
+            ([STATUS_DEGRADED, STATUS_OUTAGE], STATUS_OUTAGE),
+            ([STATUS_OUTAGE, STATUS_OPERATIONAL], STATUS_OUTAGE),
+            ([STATUS_UNKNOWN, STATUS_OPERATIONAL], STATUS_UNKNOWN),
+            ([STATUS_UNKNOWN, STATUS_OUTAGE], STATUS_OUTAGE),
+        ],
+    )
+    def test_severity_ordering(self, statuses, expected):
+        assert _worst(statuses) == expected
+
+
+class TestSummarizePool:
+    """Tests for _summarize_pool — CIRISStatus FSD §2.2 semantics."""
+
+    @pytest.fixture
+    def config(self):
+        return {"label": "LLM providers", "min_available": 1}
+
+    def test_all_healthy(self, config):
+        results = [
+            _member("deepinfra", STATUS_OPERATIONAL, ROLE_PRIMARY),
+            _member("groq", STATUS_OPERATIONAL),
+        ]
+        pool = _summarize_pool("llm", config, results)
+
+        assert pool["status"] == STATUS_OPERATIONAL
+        assert pool["available"] == 2
+        assert pool["primary_available"] is True
+        assert pool["members"] == ["deepinfra", "groq"]
+
+    def test_one_member_down_is_still_operational(self, config):
+        """The whole point of issue #7: a dead fallback is routed around."""
+        results = [
+            _member("deepinfra", STATUS_OPERATIONAL, ROLE_PRIMARY),
+            _member("together", STATUS_OUTAGE),
+        ]
+        pool = _summarize_pool("llm", config, results)
+
+        assert pool["status"] == STATUS_OPERATIONAL
+        assert pool["available"] == 1
+
+    def test_degraded_member_counts_as_unavailable(self, config):
+        """A degraded member is routed around, so it does not count toward the threshold."""
+        results = [
+            _member("deepinfra", STATUS_DEGRADED, ROLE_PRIMARY),
+            _member("groq", STATUS_OPERATIONAL),
+        ]
+        pool = _summarize_pool("llm", config, results)
+
+        assert pool["available"] == 1
+        assert pool["status"] == STATUS_OPERATIONAL
+        assert pool["primary_available"] is False
+
+    def test_serving_on_fallback_is_not_impairment(self, config):
+        """Primary down, fallback up: operational, but the fact is recorded."""
+        results = [
+            _member("deepinfra", STATUS_OUTAGE, ROLE_PRIMARY),
+            _member("openrouter", STATUS_OPERATIONAL),
+        ]
+        pool = _summarize_pool("llm", config, results)
+
+        assert pool["status"] == STATUS_OPERATIONAL
+        assert pool["primary_available"] is False
+
+    def test_all_members_down_is_outage(self, config):
+        results = [
+            _member("deepinfra", STATUS_OUTAGE, ROLE_PRIMARY),
+            _member("groq", STATUS_DEGRADED),
+        ]
+        pool = _summarize_pool("llm", config, results)
+
+        assert pool["status"] == STATUS_OUTAGE
+        assert pool["available"] == 0
+
+    def test_quorum_below_threshold_is_degraded(self):
+        """min_available > 1: still serving, but the margin is gone."""
+        config = {"label": "LLM providers", "min_available": 2}
+        results = [
+            _member("deepinfra", STATUS_OPERATIONAL, ROLE_PRIMARY),
+            _member("groq", STATUS_OUTAGE),
+        ]
+        pool = _summarize_pool("llm", config, results)
+
+        assert pool["status"] == STATUS_DEGRADED
+        assert pool["available"] == 1
+
+    def test_empty_pool_is_unknown(self, config):
+        """Never green by omission."""
+        pool = _summarize_pool("llm", config, [_member("billing", STATUS_OPERATIONAL, None, "internal")])
+
+        assert pool["status"] == STATUS_UNKNOWN
+        assert pool["members"] == []
+        assert pool["primary_available"] is None
+
+    def test_ignores_other_pools_members(self, config):
+        results = [
+            _member("deepinfra", STATUS_OPERATIONAL, ROLE_PRIMARY),
+            _member("billing", STATUS_OUTAGE, None, "internal"),
+        ]
+        pool = _summarize_pool("llm", config, results)
+
+        assert pool["members"] == ["deepinfra"]
+        assert pool["status"] == STATUS_OPERATIONAL
+
+
+class TestServiceStatusRollup:
+    """get_status must not inherit pooled member health (issue #7 D1)."""
+
+    @staticmethod
+    async def _status_with(statuses):
+        """Run get_status with each provider forced to a given status."""
+        import hooks.status_handler as sh
+
+        async def fake_check(client, provider_id, config):
+            result = _init_provider_result(provider_id, config)
+            result["status"] = statuses[provider_id]
+            return result
+
+        sh._status_cache = {}
+        sh._cache_timestamp = 0
+        with patch.object(sh, "check_provider", fake_check):
+            return await sh.get_status()
+
+    @pytest.mark.asyncio
+    async def test_healthy_fabric_is_operational(self):
+        status = await self._status_with(
+            {p: STATUS_OPERATIONAL for p in PROVIDERS}
+        )
+
+        assert status["status"] == STATUS_OPERATIONAL
+        assert status["pools"]["llm"]["status"] == STATUS_OPERATIONAL
+        assert status["pools"]["llm"]["available"] == 4
+
+    @pytest.mark.asyncio
+    async def test_single_llm_outage_does_not_degrade_service(self):
+        """Four days of amber for one unused provider — the bug this fixes."""
+        statuses = {p: STATUS_OPERATIONAL for p in PROVIDERS}
+        statuses["together"] = STATUS_OUTAGE
+
+        status = await self._status_with(statuses)
+
+        assert status["status"] == STATUS_OPERATIONAL
+        assert status["pools"]["llm"]["status"] == STATUS_OPERATIONAL
+        # The member's own verdict is preserved, not overwritten
+        together = next(p for p in status["providers"] if p["provider"] == "together")
+        assert together["status"] == STATUS_OUTAGE
+
+    @pytest.mark.asyncio
+    async def test_slow_llm_provider_does_not_degrade_service(self):
+        statuses = {p: STATUS_OPERATIONAL for p in PROVIDERS}
+        statuses["openrouter"] = STATUS_DEGRADED
+
+        status = await self._status_with(statuses)
+
+        assert status["status"] == STATUS_OPERATIONAL
+
+    @pytest.mark.asyncio
+    async def test_primary_outage_is_visible_but_not_impairment(self):
+        statuses = {p: STATUS_OPERATIONAL for p in PROVIDERS}
+        statuses["deepinfra"] = STATUS_OUTAGE
+
+        status = await self._status_with(statuses)
+
+        assert status["status"] == STATUS_OPERATIONAL
+        assert status["pools"]["llm"]["primary_available"] is False
+
+    @pytest.mark.asyncio
+    async def test_entire_pool_down_is_an_outage(self):
+        """Nothing left to route to is real impairment."""
+        statuses = {p: STATUS_OUTAGE for p in PROVIDERS if p != "billing"}
+        statuses["billing"] = STATUS_OPERATIONAL
+
+        status = await self._status_with(statuses)
+
+        assert status["status"] == STATUS_OUTAGE
+        assert status["pools"]["llm"]["status"] == STATUS_OUTAGE
+
+    @pytest.mark.asyncio
+    async def test_billing_outage_degrades_service(self):
+        """Non-pooled dependency: nothing else serves it."""
+        statuses = {p: STATUS_OPERATIONAL for p in PROVIDERS}
+        statuses["billing"] = STATUS_OUTAGE
+
+        status = await self._status_with(statuses)
+
+        assert status["status"] == STATUS_OUTAGE
+
+    @pytest.mark.asyncio
+    async def test_billing_degraded_degrades_service(self):
+        statuses = {p: STATUS_OPERATIONAL for p in PROVIDERS}
+        statuses["billing"] = STATUS_DEGRADED
+
+        status = await self._status_with(statuses)
+
+        assert status["status"] == STATUS_DEGRADED
+
+    @given(
+        llm_statuses=st.lists(
+            st.sampled_from([STATUS_OPERATIONAL, STATUS_DEGRADED, STATUS_OUTAGE]),
+            min_size=4,
+            max_size=4,
+        )
+    )
+    @settings(max_examples=50, deadline=None)
+    def test_property_healthy_billing_and_one_llm_is_operational(self, llm_statuses):
+        """Property: any pool state with >=1 operational member leaves us operational."""
+        import asyncio
+
+        pool_ids = [p for p in PROVIDERS if p != "billing"]
+        statuses = dict(zip(pool_ids, llm_statuses))
+        statuses["billing"] = STATUS_OPERATIONAL
+
+        status = asyncio.run(self._status_with(statuses))
+
+        if STATUS_OPERATIONAL in llm_statuses:
+            assert status["status"] == STATUS_OPERATIONAL
+        else:
+            assert status["status"] == STATUS_OUTAGE

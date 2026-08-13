@@ -1,36 +1,114 @@
 # CIRISProxy LiteLLM Configuration
 # Model routing for credit-gated LLM access
+#
+# This file is the source of truth for model routing. CIRISBridge's Ansible
+# template (roles/proxy/templates/litellm_config.yaml.j2) is synced FROM here —
+# when the two drift, the monitored set in hooks/status_handler.py stops
+# matching the serving set, which is how DeepInfra ended up serving every
+# request while nothing on the status board watched it.
+#
+# Any change to the default chain below must be mirrored in PROVIDERS in
+# hooks/status_handler.py.
 
 model_list:
-  # Llama 4 Maverick - Primary model for CIRIS Agent
-  # Best for structured outputs / tool calling
-  # Pricing: Together ~$0.50/$0.80, Groq $0.50/$0.77, OpenRouter $0.11/$0.34 per 1M tokens
+  # Qwen 3.6-35B-A3B - PRIMARY model for CIRIS Agent (2026-04-27)
+  # MoE: 35B total / 3B active params, 262K context
+  # DeepInfra primary, OpenRouter backup, Groq llama-4-scout cross-model failover
+  # extra_body.chat_template_kwargs.enable_thinking=false: disables Qwen3 reasoning chains by default
+  - model_name: "qwen-3.6-35b"
+    litellm_params:
+      model: "deepinfra/Qwen/Qwen3.6-35B-A3B"
+      api_key: "os.environ/DEEPINFRA_API_KEY"
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false
+
+  - model_name: "deepinfra/qwen-3.6-35b"
+    litellm_params:
+      model: "deepinfra/Qwen/Qwen3.6-35B-A3B"
+      api_key: "os.environ/DEEPINFRA_API_KEY"
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false
+
+  - model_name: "openrouter/qwen-3.6-35b"
+    litellm_params:
+      model: "openrouter/qwen/qwen3.6-35b-a3b"
+      api_key: "os.environ/OPENROUTER_API_KEY"
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false
+
+  # Groq Qwen 3.6-27B - high-speed cross-model failover (2026-08-13)
+  # Replaces Llama 4 Scout, which Groq retired. Same Qwen 3.6 family as the
+  # primary, so tool-calling and prompt behaviour survive the failover.
+  - model_name: "groq/qwen-3.6-27b"
+    litellm_params:
+      model: "groq/qwen/qwen3.6-27b"
+      api_key: "os.environ/GROQ_API_KEY"
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false
+
+  # Qwen 3.5-35B-A3B - kept for backwards compatibility
+  - model_name: "qwen-3.5-35b"
+    litellm_params:
+      model: "openrouter/qwen/qwen3.5-35b-a3b"
+      api_key: "os.environ/OPENROUTER_API_KEY"
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false
+
+  - model_name: "openrouter/qwen-3.5-35b"
+    litellm_params:
+      model: "openrouter/qwen/qwen3.5-35b-a3b"
+      api_key: "os.environ/OPENROUTER_API_KEY"
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false
+
+  - model_name: "deepinfra/qwen-3.5-35b"
+    litellm_params:
+      model: "deepinfra/Qwen/Qwen3.5-35B-A3B"
+      api_key: "os.environ/DEEPINFRA_API_KEY"
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false
+
+  # Llama 4 - DEPRECATED, legacy aliases only (2026-08-13)
+  #
+  # Verified against each provider's /models listing on 2026-08-13 with
+  # scripts/verify_models.py. Removed because the provider no longer serves them:
+  #   groq/meta-llama/llama-4-scout-17b-16e-instruct       (was: llama-4-scout,
+  #                                                          groq/llama-4-scout, fast)
+  #   groq/meta-llama/llama-4-maverick-17b-128e-instruct   (was: groq/llama-4-maverick)
+  #   together_ai/meta-llama/Llama-4-Maverick-17B-128E-FP8 (was: together/llama-4-scout,
+  #                                                          together/llama-4-maverick)
+  #
+  # OpenRouter still serves both, so the bare aliases survive there for clients
+  # that have not migrated. Do not route new traffic here.
+  - model_name: "llama-4-scout"
+    litellm_params:
+      model: "openrouter/meta-llama/llama-4-scout"
+      api_key: "os.environ/OPENROUTER_API_KEY"
+
+  - model_name: "openrouter/llama-4-scout"
+    litellm_params:
+      model: "openrouter/meta-llama/llama-4-scout"
+      api_key: "os.environ/OPENROUTER_API_KEY"
+
   - model_name: "llama-4-maverick"
     litellm_params:
-      model: "together_ai/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
-      api_key: "os.environ/TOGETHER_API_KEY"
-
-  - model_name: "together/llama-4-maverick"
-    litellm_params:
-      model: "together_ai/meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
-      api_key: "os.environ/TOGETHER_API_KEY"
-
-  - model_name: "groq/llama-4-maverick"
-    litellm_params:
-      model: "groq/meta-llama/llama-4-maverick-17b-128e-instruct"
-      api_key: "os.environ/GROQ_API_KEY"
+      model: "openrouter/meta-llama/llama-4-maverick"
+      api_key: "os.environ/OPENROUTER_API_KEY"
 
   - model_name: "openrouter/llama-4-maverick"
     litellm_params:
       model: "openrouter/meta-llama/llama-4-maverick"
       api_key: "os.environ/OPENROUTER_API_KEY"
-      extra_body:
-        provider:
-          ignore: ["Friendli", "Google"]
 
   # GPT-OSS-20B - OpenAI's open-weight model (Apache 2.0)
   # NOTE: Weak at structured outputs / tool calling - kept for reference
-  # Cheapest option: Together $0.05/$0.20 per 1M tokens
   - model_name: "gpt-oss-20b"
     litellm_params:
       model: "together_ai/openai/gpt-oss-20b"
@@ -54,9 +132,6 @@ model_list:
       model: "openrouter/openai/gpt-oss-20b"
       api_key: "os.environ/OPENROUTER_API_KEY"
       max_tokens: 131072
-      extra_body:
-        provider:
-          ignore: ["Friendli", "Google"]
 
   # Groq Models (fast, cost-effective)
   - model_name: "groq/llama-3.3-70b"
@@ -97,22 +172,23 @@ model_list:
       api_key: "os.environ/OPENAI_API_KEY"
 
   # Aliases for simpler client usage
-  # Default model for CIRIS Agent - Llama 4 Maverick via OpenRouter (cheapest)
-  # Pricing: OpenRouter $0.11/$0.34 per 1M tokens
+  # Default model for CIRIS Agent - Qwen 3.6-35B-A3B via DeepInfra (2026-04-27)
   - model_name: "default"
     litellm_params:
-      model: "openrouter/meta-llama/llama-4-maverick"
-      api_key: "os.environ/OPENROUTER_API_KEY"
-      max_tokens: 16384  # Allow long outputs for agent responses
+      model: "deepinfra/Qwen/Qwen3.6-35B-A3B"
+      api_key: "os.environ/DEEPINFRA_API_KEY"
       extra_body:
-        provider:
-          ignore: ["Friendli", "Google"]
+        chat_template_kwargs:
+          enable_thinking: false
 
+  # Fast alias - Groq Qwen 3.6-27B (high-speed cross-model failover)
   - model_name: "fast"
     litellm_params:
-      model: "groq/meta-llama/llama-4-maverick-17b-128e-instruct"
+      model: "groq/qwen/qwen3.6-27b"
       api_key: "os.environ/GROQ_API_KEY"
-      max_tokens: 16384  # Allow long outputs for agent responses
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false
 
 litellm_settings:
   # Custom callback for CIRISBilling integration
@@ -132,6 +208,9 @@ litellm_settings:
 
   # Set verbose for debugging (disable in production)
   set_verbose: false
+
+  # Disable telemetry
+  telemetry: false
 
 router_settings:
   # Routing strategy for model groups with multiple deployments
@@ -157,15 +236,23 @@ router_settings:
   # Seconds to exclude a failing provider from routing
   cooldown_time: 60
 
-  # Fallback chain - Llama 4 Maverick across 3 providers
-  # Pricing: OpenRouter $0.11/$0.34, Groq $0.50/$0.77, Together ~$0.50/$0.80 per 1M tokens
+  # Fallback chain
+  # Primary: Qwen 3.6 - DeepInfra 35B-A3B → OpenRouter 35B-A3B → Groq 27B
+  # Every entry below must name a model that exists upstream; verify with
+  # scripts/verify_models.py before merging a change here.
   fallbacks:
-    # Only fallback to other Llama 4 Maverick providers - never degrade to older models
-    - "default": ["groq/llama-4-maverick", "together/llama-4-maverick"]
-    - "llama-4-maverick": ["groq/llama-4-maverick", "together/llama-4-maverick"]
-    - "together/llama-4-maverick": ["groq/llama-4-maverick", "openrouter/llama-4-maverick"]
-    - "groq/llama-4-maverick": ["openrouter/llama-4-maverick", "together/llama-4-maverick"]
-    - "openrouter/llama-4-maverick": ["groq/llama-4-maverick", "together/llama-4-maverick"]
+    - "default": ["openrouter/qwen-3.6-35b", "groq/qwen-3.6-27b"]
+    - "qwen-3.6-35b": ["openrouter/qwen-3.6-35b", "groq/qwen-3.6-27b"]
+    - "deepinfra/qwen-3.6-35b": ["openrouter/qwen-3.6-35b", "groq/qwen-3.6-27b"]
+    - "openrouter/qwen-3.6-35b": ["deepinfra/qwen-3.6-35b", "groq/qwen-3.6-27b"]
+    - "groq/qwen-3.6-27b": ["deepinfra/qwen-3.6-35b", "openrouter/qwen-3.6-35b"]
+    # Fast alias - Groq first, then the full-size Qwen 3.6 deployments
+    - "fast": ["openrouter/qwen-3.6-35b", "deepinfra/qwen-3.6-35b"]
+    # Legacy Llama 4 aliases (deprecated) - cross-model failover to Qwen 3.6
+    - "llama-4-scout": ["openrouter/qwen-3.6-35b"]
+    - "openrouter/llama-4-scout": ["openrouter/qwen-3.6-35b"]
+    - "llama-4-maverick": ["openrouter/qwen-3.6-35b"]
+    - "openrouter/llama-4-maverick": ["openrouter/qwen-3.6-35b"]
     - "groq/llama-3.3-70b": ["together/llama-3.1-70b", "openai/gpt-4o-mini"]
 
 general_settings:
@@ -178,6 +265,9 @@ general_settings:
 
   # Disable the built-in database (we use CIRISBilling for billing)
   database_url: null
+
+  # Disable spend logs for ZDR compliance
+  disable_spend_logs: true
 
   # Allow all origins for mobile clients
   allowed_ips: null

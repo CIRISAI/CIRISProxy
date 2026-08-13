@@ -4,9 +4,14 @@ Pytest fixtures for CIRISProxy tests.
 
 import os
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
+
+# Importing this installs stub litellm.proxy modules into sys.modules. conftest
+# is loaded before any test module, so the stubs are in place before the first
+# `import hooks.custom_auth` regardless of import order inside test files.
+from tests import litellm_stubs  # noqa: F401
 
 # Set test environment variables before importing hooks
 os.environ.setdefault("BILLING_API_URL", "https://billing.test.ciris.ai")

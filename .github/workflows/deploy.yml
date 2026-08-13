@@ -5,33 +5,27 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false # never cancel a publish mid-push
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: cirisai/cirisproxy
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-
-      - name: Run tests
-        run: pytest tests/ -v --tb=short
+  # The publish gate is the full CI suite, called rather than copied. The
+  # inline `pytest tests/` job that used to live here ran neither ruff, the
+  # coverage gate, the config audit, nor the image smoke — so main could
+  # publish an image that CI on the PR would have rejected.
+  ci:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+    secrets: inherit
 
   build:
-    needs: test
+    needs: ci
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -62,7 +56,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: true

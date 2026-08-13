@@ -70,9 +70,10 @@ curl -X POST http://localhost:4000/v1/chat/completions \
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `GROQ_API_KEY` | Yes | Groq API key |
-| `TOGETHER_API_KEY` | Yes | Together AI API key |
-| `OPENROUTER_API_KEY` | No | OpenRouter API key (fallback) |
+| `DEEPINFRA_API_KEY` | Yes | DeepInfra API key (primary provider) |
+| `OPENROUTER_API_KEY` | Yes | OpenRouter API key (first fallback) |
+| `GROQ_API_KEY` | Yes | Groq API key (second fallback, `fast` alias) |
+| `TOGETHER_API_KEY` | No | Together AI API key |
 | `EXA_API_KEY` | Yes* | Exa AI API key (ZDR-compliant search) |
 | `BRAVE_API_KEY` | No | Brave Search API key (fallback) |
 | `SEARCH_PROVIDER` | No | `auto` (default), `exa`, or `brave` |
@@ -95,6 +96,40 @@ curl -X POST http://localhost:4000/v1/chat/completions \
 | `/v1/status/simple` | GET | Simple liveness check |
 | `/v1/web/search` | POST | Web search (requires credits) |
 | `/health/liveliness` | GET | Container health check |
+
+### Reading `/v1/status`
+
+`status` is the **service's own** health: it covers the dependencies nothing
+else can serve (billing), plus any provider pool that has dropped below
+`min_available`. LLM providers are pooled — the router has alternatives — so a
+single provider being slow or down shows up in `providers[]` and `pools`
+without degrading the service. It is not impairment while there is somewhere
+to route.
+
+```jsonc
+{
+  "status": "operational",          // the service, not the pool members
+  "providers": [
+    { "provider": "deepinfra", "role": "primary",  "status": "operational",
+      "models": { "configured": 2, "available": 2, "missing": [] } },
+    { "provider": "groq",      "role": "fallback", "status": "degraded", "...": "..." }
+  ],
+  "pools": {
+    "llm": { "status": "operational", "available": 3, "min_available": 1,
+             "primary_available": true }
+  }
+}
+```
+
+`primary_available: false` with an operational pool means **we are serving on a
+fallback** — worth knowing, since it precedes cost, latency and quality
+changes, but not an outage.
+
+Each provider's `models` block compares the models configured in
+`litellm_config.yaml` against that provider's own `/models` listing, using the
+response the health check already fetched. A provider that is reachable but no
+longer serves a model we route to it reports `degraded` with the missing model
+named. See [Model availability](#model-availability).
 
 ## Test Auth Mode
 
@@ -168,7 +203,36 @@ pytest --cov=hooks --cov=sdk --cov=server --cov-report=term-missing
 
 # Lint
 ruff check .
+
+# Audit configured models against what providers actually serve
+python -m hooks.verify_models
 ```
+
+### Model availability
+
+Providers retire models without notice, and a config that was correct when
+written keeps naming them. Groq dropped `llama-4-scout` and `llama-4-maverick`
+while both were still in the routing chain — including the last hop of the
+default chain, which would only have failed during a primary outage, when the
+fallback was actually needed.
+
+`python -m hooks.verify_models` compares every model in `litellm_config.yaml`
+against its provider's `/models` listing, and checks that no fallback chain
+names an alias that is not configured. It queries only free listing endpoints,
+never inference. Providers with no key in the environment report `skipped`
+rather than failing, so it is useful in a keyless checkout.
+
+It runs in three places:
+
+| Where | When | Purpose |
+|-------|------|---------|
+| `config-audit` job in CI | every PR | catches a bad edit before merge |
+| `model-availability.yml` | daily 07:00 UTC | catches a retirement upstream; files an issue |
+| `/v1/status` | every health check | reports it live, per provider, at no extra cost |
+
+**Any change to the routing chain in `litellm_config.yaml` must be mirrored in
+`PROVIDERS` in `hooks/status_handler.py`** — monitoring the fallbacks while the
+primary goes unchecked renders a green board during a primary outage.
 
 ### Project Structure
 
@@ -177,8 +241,10 @@ CIRISProxy/
 ├── hooks/
 │   ├── billing_callback.py   # LiteLLM callback for billing integration
 │   ├── custom_auth.py        # Google OAuth + test token verification
+│   ├── model_audit.py        # Configured models vs. provider /models listings
 │   ├── search_handler.py     # Web search (Exa/Brave)
-│   └── status_handler.py     # Provider health monitoring
+│   ├── status_handler.py     # Provider health monitoring + pool rollup
+│   └── verify_models.py      # CLI: python -m hooks.verify_models
 ├── libs/
 │   └── cirislens/sdk/        # CIRISLens log shipping (git submodule)
 ├── scripts/
@@ -187,7 +253,7 @@ CIRISProxy/
 ├── server.py                 # Custom FastAPI endpoints
 ├── litellm_config.yaml       # Model routing configuration
 ├── docker-compose.yml        # Container orchestration
-└── tests/                    # Test suite (221 tests, 86% coverage)
+└── tests/                    # Test suite (306 tests)
 ```
 
 ## Ecosystem

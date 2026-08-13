@@ -8,21 +8,21 @@ Uses:
 """
 
 import os
-from unittest.mock import patch, AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
 import respx
-from hypothesis import given, strategies as st, settings
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from hooks.search_handler import (
-    SearchHandler,
-    handle_search_request,
     BRAVE_API_URL,
     EXA_API_URL,
+    SearchHandler,
     _get_active_provider,
+    handle_search_request,
 )
-
 
 # =============================================================================
 # SearchHandler Tests

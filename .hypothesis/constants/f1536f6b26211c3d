@@ -1,4 +1,0 @@
-# file: /home/emoore/CIRISProxy/libs/cirislens/sdk/__init__.py
-# hypothesis_version: 6.148.9
-
-['1.1.0', 'BackoffConfig', 'CircuitBreaker', 'CircuitBreakerConfig', 'CircuitState', 'DEFAULT_ENDPOINT', 'ExponentialBackoff', 'LogShipper', 'LogShipperHandler', 'ResilientClient', 'from_env', 'setup_logging']

@@ -25,6 +25,7 @@ COPY hooks/billing_callback.py /app/billing_callback.py
 COPY hooks/custom_auth.py /app/custom_auth.py
 COPY hooks/search_handler.py /app/search_handler.py
 COPY hooks/status_handler.py /app/status_handler.py
+COPY hooks/model_audit.py /app/model_audit.py
 
 # Copy custom server wrapper
 COPY server.py /app/server.py
@@ -33,6 +34,9 @@ COPY server.py /app/server.py
 COPY litellm_config.yaml /app/config.yaml
 
 # Copy scripts
+# hooks/verify_models.py is deliberately NOT shipped: it is a CI and developer
+# tool, and the model audit it performs runs inside the image anyway, off the
+# health probe's /models response (see hooks/model_audit.py).
 COPY scripts/healthcheck.py /app/healthcheck.py
 COPY scripts/entrypoint.sh /app/entrypoint.sh
 COPY scripts/preprocess_config.py /app/preprocess_config.py

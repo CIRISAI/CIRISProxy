@@ -7,26 +7,23 @@ Uses:
 - mocking for HTTP requests
 """
 
-import json
 import logging
 import os
-import queue
-import time
-from unittest.mock import patch, MagicMock, Mock
-from urllib.error import URLError, HTTPError
 from io import BytesIO
+from unittest.mock import MagicMock, patch
+from urllib.error import HTTPError, URLError
 
 import pytest
-from hypothesis import given, strategies as st, settings
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from libs.cirislens.sdk import (
+    DEFAULT_ENDPOINT,
     LogShipper,
     LogShipperHandler,
-    setup_logging,
     from_env,
-    DEFAULT_ENDPOINT,
+    setup_logging,
 )
-
 
 # =============================================================================
 # LogShipper Tests

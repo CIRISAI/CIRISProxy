@@ -418,9 +418,9 @@ def _import_google_auth():
         ProxyException: If google-auth is not installed
     """
     try:
-        from google.oauth2 import id_token
-        from google.auth.transport import requests as google_requests
         from google.auth import jwt
+        from google.auth.transport import requests as google_requests
+        from google.oauth2 import id_token
         return id_token, google_requests, jwt
     except ImportError:
         raise ProxyException(
@@ -684,9 +684,9 @@ def _try_import_google_auth_silent():
         Tuple of (id_token, google_requests, jwt) or None if not installed
     """
     try:
-        from google.oauth2 import id_token
-        from google.auth.transport import requests as google_requests
         from google.auth import jwt
+        from google.auth.transport import requests as google_requests
+        from google.oauth2 import id_token
         return id_token, google_requests, jwt
     except ImportError:
         return None

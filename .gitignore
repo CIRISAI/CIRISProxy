@@ -55,4 +55,11 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Test and lint artifacts. These were tracked once and churned on every local
+# run, leaving a permanently dirty tree that hides real changes in git status.
 .hypothesis/
+.coverage
+coverage.xml
+.pytest_cache/
+.ruff_cache/
