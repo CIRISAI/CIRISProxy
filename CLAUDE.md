@@ -6,6 +6,21 @@
 **Tests:** 200 passing, 86% coverage
 **CI/CD:** GitHub Actions → GHCR
 
+### Status Endpoint Semantics
+
+`/v1/status` reports two different things, and conflating them cost four days
+of public amber (issue #7):
+
+- `status` — **this service's** health. Non-pooled dependencies (billing) plus
+  any pool below `min_available`. One dead LLM provider does not appear here.
+- `pools` — capability rollup over redundant providers. `min_available: 1`, so
+  the pool is operational while any member is up. `primary_available: false`
+  means we are serving on a fallback: worth knowing, not an outage.
+
+Each LLM provider also carries a `models` block auditing the configured models
+against that provider's `/models` listing — free, since the health check
+already fetched that response. See `hooks/model_audit.py`.
+
 ### Recent Changes
 - Migrated LogShipper to CIRISLens git submodule (libs/cirislens/sdk)
 - Added Exa AI as primary ZDR-compliant search provider (Brave fallback)
@@ -77,9 +92,10 @@ CIRISProxy/
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `GROQ_API_KEY` | Yes | Groq API key |
-| `TOGETHER_API_KEY` | Yes | Together AI API key |
-| `OPENROUTER_API_KEY` | Yes | OpenRouter API key (default provider) |
+| `DEEPINFRA_API_KEY` | Yes | DeepInfra API key (**primary** — serves the default chain) |
+| `OPENROUTER_API_KEY` | Yes | OpenRouter API key (first fallback) |
+| `GROQ_API_KEY` | Yes | Groq API key (second fallback, `fast` alias) |
+| `TOGETHER_API_KEY` | No | Together AI API key (not in the default chain) |
 | `EXA_API_KEY` | Yes* | Exa AI search (ZDR-compliant) |
 | `BRAVE_API_KEY` | No | Brave Search (fallback) |
 | `SEARCH_PROVIDER` | No | `auto` (default), `exa`, or `brave` |
@@ -94,21 +110,34 @@ CIRISProxy/
 
 ## Model Routing
 
-Primary model: **Llama 4 Maverick** across 3 providers for redundancy.
+Primary model: **Qwen 3.6-35B-A3B** (MoE, 262K context).
 
 ```yaml
-# Default routing (cheapest first)
-default → openrouter/meta-llama/llama-4-maverick  # $0.11/$0.34 per 1M
+# Default routing
+default → deepinfra/Qwen/Qwen3.6-35B-A3B      # PRIMARY — the one that serves
   ↓ fallback
-groq/llama-4-maverick                              # $0.50/$0.77 per 1M
+openrouter/qwen/qwen3.6-35b-a3b
   ↓ fallback
-together/llama-4-maverick                          # $0.50/$0.80 per 1M
+groq/qwen/qwen3.6-27b                          # cross-model, high speed
 ```
 
 Configured in `litellm_config.yaml` with:
 - Error-specific retry policies (timeout, rate limit, server error)
 - 60s cooldown for failing providers
-- Never degrades to older models (Llama 4 only)
+- Same model family throughout the chain, so tool-calling behaviour survives failover
+
+**Two invariants when editing the chain:**
+
+1. Mirror it in `PROVIDERS` in `hooks/status_handler.py`. Monitoring the
+   fallbacks while the primary goes unchecked renders a green board during a
+   primary outage — that was issue #7.
+2. Run `python -m hooks.verify_models` before merging. Providers retire models
+   silently; Groq dropped `llama-4-scout` and `llama-4-maverick` while both
+   were still named in the chain.
+
+`litellm_config.yaml` in this repo is the source of truth; CIRISBridge's
+Ansible template is synced from it. When the two drift, the monitored set stops
+matching the serving set.
 
 ## Credit Model
 
@@ -158,7 +187,7 @@ BILLING_API_URL=http://billing:8000
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/v1/chat/completions` | POST | OpenAI-compatible chat |
-| `/v1/status` | GET | Provider health status |
+| `/v1/status` | GET | Provider health + pool rollup + model audit |
 | `/v1/status/simple` | GET | Liveness check |
 | `/v1/web/search` | POST | Web search (Exa/Brave) |
 | `/health/liveliness` | GET | Container health |
@@ -171,12 +200,31 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
 # Run tests
-pytest                                    # All 200 tests
+pytest                                        # All 306 tests
 pytest --cov=hooks --cov-report=term-missing  # With coverage
 
-# Lint
+# Lint (enforced in CI — keep it clean)
 ruff check .
+
+# Audit routing config against what providers actually serve
+python -m hooks.verify_models
 ```
+
+## CI
+
+| Workflow | Trigger | Jobs |
+|----------|---------|------|
+| `ci.yml` | PRs; called by `deploy.yml` | ruff, pytest + coverage gate (75%), config audit, image runtime smoke |
+| `deploy.yml` | push to main | calls `ci.yml`, then builds/pushes to GHCR |
+| `model-availability.yml` | daily 07:00 UTC | live model audit; opens/closes an issue labelled `model-availability` |
+| `sonarcloud.yml` | push/PR | static analysis |
+
+`ci.yml` is a reusable workflow — `deploy.yml` calls it rather than keeping a
+second copy, so the publish gate and the PR gate cannot drift. The image
+runtime smoke boots the built container and requires it to serve
+`/v1/status/simple`; it also asserts every hook module imports inside the
+image, which is what catches a new module added to `hooks/` without its
+`COPY` line in the Dockerfile.
 
 ## Deployment
 
