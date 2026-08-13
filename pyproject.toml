@@ -12,6 +12,9 @@ dependencies = [
     # CVE-2026-49468 (auth bypass via Host Header Injection) affects < 1.84.0 — must be >= 1.84.0
     "litellm==1.90.0",
     "httpx>=0.25.0",
+    # hooks/model_audit.py parses litellm_config.yaml directly. LiteLLM pulls
+    # PyYAML in transitively, but a module that imports it should declare it.
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -24,6 +27,11 @@ dev = [
     "ruff>=0.4.0",
     "fastapi>=0.100.0",  # For testing custom_auth hook
 ]
+
+[project.scripts]
+# Audits litellm_config.yaml against each provider's live /models listing.
+# Run in CI and on a schedule — providers retire models without notice.
+ciris-proxy-verify-models = "hooks.verify_models:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -40,6 +48,10 @@ addopts = "-v --tb=short"
 [tool.ruff]
 target-version = "py310"
 line-length = 100
+# libs/ is the CIRISLens git submodule — another repo's source, carrying its own
+# ruff config and its own CI. Linting it here fails our build for violations we
+# cannot fix in this repo.
+extend-exclude = ["libs"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
