@@ -1,11 +1,12 @@
 """Tests for config preprocessor."""
 
 import os
-import tempfile
-import yaml
-import pytest
-
 import sys
+import tempfile
+
+import pytest
+import yaml
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 from preprocess_config import preprocess_config

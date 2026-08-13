@@ -3,7 +3,6 @@ Unit tests for CIRISBillingCallback.
 """
 
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -855,7 +854,7 @@ class TestGetVisionCompatibleModel:
 
     def test_groq_maverick_routes_to_together(self):
         """Test Groq Maverick model routes to Together AI."""
-        from hooks.billing_callback import _get_vision_compatible_model, VISION_FALLBACK_MODEL
+        from hooks.billing_callback import _get_vision_compatible_model
 
         result = _get_vision_compatible_model("groq/llama-4-maverick-17b")
         assert result is not None
@@ -882,35 +881,35 @@ class TestGetVisionCompatibleModel:
 
     def test_groq_other_model_uses_fallback(self):
         """Test other Groq models use fallback."""
-        from hooks.billing_callback import _get_vision_compatible_model, VISION_FALLBACK_MODEL
+        from hooks.billing_callback import VISION_FALLBACK_MODEL, _get_vision_compatible_model
 
         result = _get_vision_compatible_model("groq/whisper-large")
         assert result == VISION_FALLBACK_MODEL
 
     def test_default_model_uses_fallback(self):
         """Test 'default' model uses fallback for vision."""
-        from hooks.billing_callback import _get_vision_compatible_model, VISION_FALLBACK_MODEL
+        from hooks.billing_callback import VISION_FALLBACK_MODEL, _get_vision_compatible_model
 
         result = _get_vision_compatible_model("default")
         assert result == VISION_FALLBACK_MODEL
 
     def test_fast_model_uses_fallback(self):
         """Test 'fast' model uses fallback for vision."""
-        from hooks.billing_callback import _get_vision_compatible_model, VISION_FALLBACK_MODEL
+        from hooks.billing_callback import VISION_FALLBACK_MODEL, _get_vision_compatible_model
 
         result = _get_vision_compatible_model("fast")
         assert result == VISION_FALLBACK_MODEL
 
     def test_empty_model_uses_fallback(self):
         """Test empty model uses fallback."""
-        from hooks.billing_callback import _get_vision_compatible_model, VISION_FALLBACK_MODEL
+        from hooks.billing_callback import VISION_FALLBACK_MODEL, _get_vision_compatible_model
 
         result = _get_vision_compatible_model("")
         assert result == VISION_FALLBACK_MODEL
 
     def test_none_model_uses_fallback(self):
         """Test None model uses fallback."""
-        from hooks.billing_callback import _get_vision_compatible_model, VISION_FALLBACK_MODEL
+        from hooks.billing_callback import VISION_FALLBACK_MODEL, _get_vision_compatible_model
 
         result = _get_vision_compatible_model(None)
         assert result == VISION_FALLBACK_MODEL

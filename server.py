@@ -17,10 +17,10 @@ sys.path.insert(0, "/app")
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from search_handler import handle_search_request
 
 # Import handlers
 from status_handler import get_status
-from search_handler import handle_search_request
 
 
 def add_custom_routes(app: FastAPI) -> None:

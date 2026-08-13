@@ -23,6 +23,7 @@ Only log: interaction_id, model names, token counts, status codes, timing
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import sys
@@ -33,6 +34,9 @@ from typing import Any
 
 import httpx
 from litellm.integrations.custom_logger import CustomLogger
+
+# LogShipper from the CIRISLens SDK submodule (libs/cirislens)
+from libs.cirislens.sdk import LogShipper
 
 
 # Custom exceptions for billing errors
@@ -59,8 +63,6 @@ class BillingServiceError(BillingError):
 class BillingServiceUnavailableError(BillingError):
     """Raised when billing service is unreachable."""
 
-# Import LogShipper from CIRISLens SDK submodule
-from libs.cirislens.sdk import LogShipper
 
 # Configure logging to both stdout and file
 LOG_FILE = os.environ.get("CIRIS_LOG_FILE", "/app/logs/cirisproxy.log")
@@ -1143,7 +1145,6 @@ billing_callback_instance = CIRISBillingCallback()
 # ═══════════════════════════════════════════════════════════════════════════════
 # CALLBACK STATUS - For health check verification
 # ═══════════════════════════════════════════════════════════════════════════════
-import json
 
 CALLBACK_STATUS_FILE = "/app/callback_status.json"
 
