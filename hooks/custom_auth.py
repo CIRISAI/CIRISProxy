@@ -246,8 +246,12 @@ GOOGLE_CLIENT_ID_ANDROID = os.environ.get(
     "GOOGLE_CLIENT_ID_ANDROID",
     "265882853697-vqfv6ecjgc1ku7n6bm4hllg6csdiaild.apps.googleusercontent.com"
 )
+# Additional Google client IDs (comma-separated) — e.g. desktop OAuth client
+GOOGLE_CLIENT_IDS_EXTRA = os.environ.get("GOOGLE_CLIENT_IDS_EXTRA", "")
 # All valid Google client IDs
-GOOGLE_CLIENT_IDS = [GOOGLE_CLIENT_ID_WEB, GOOGLE_CLIENT_ID_ANDROID]
+GOOGLE_CLIENT_IDS = [GOOGLE_CLIENT_ID_WEB, GOOGLE_CLIENT_ID_ANDROID] + [
+    x.strip() for x in GOOGLE_CLIENT_IDS_EXTRA.split(",") if x.strip()
+]
 
 # Apple Sign-In configuration
 # iOS bundle ID (used as audience for Apple ID tokens)
