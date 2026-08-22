@@ -14,7 +14,8 @@ model_list:
   # Qwen 3.6-35B-A3B - PRIMARY model for CIRIS Agent (2026-04-27)
   # MoE: 35B total / 3B active params, 262K context
   # DeepInfra primary, OpenRouter backup, Groq llama-4-scout cross-model failover
-  # extra_body.chat_template_kwargs.enable_thinking=false: disables Qwen3 reasoning chains by default
+  # Qwen3 thinking disabled: DeepInfra uses chat_template_kwargs.enable_thinking=false (vLLM flag);
+  # OpenRouter uses top-level extra_body.enable_thinking=false (provider API flag).
   - model_name: "qwen-3.6-35b"
     litellm_params:
       model: "deepinfra/Qwen/Qwen3.6-35B-A3B"
@@ -36,19 +37,16 @@ model_list:
       model: "openrouter/qwen/qwen3.6-35b-a3b"
       api_key: "os.environ/OPENROUTER_API_KEY"
       extra_body:
-        chat_template_kwargs:
-          enable_thinking: false
+        enable_thinking: false  # OpenRouter: top-level, not under chat_template_kwargs
 
   # Groq Qwen 3.6-27B - high-speed cross-model failover (2026-08-13)
   # Replaces Llama 4 Scout, which Groq retired. Same Qwen 3.6 family as the
   # primary, so tool-calling and prompt behaviour survive the failover.
+  # Groq does not support Qwen3 thinking mode — no extra_body needed.
   - model_name: "groq/qwen-3.6-27b"
     litellm_params:
       model: "groq/qwen/qwen3.6-27b"
       api_key: "os.environ/GROQ_API_KEY"
-      extra_body:
-        chat_template_kwargs:
-          enable_thinking: false
 
   # Qwen 3.5-35B-A3B - kept for backwards compatibility
   - model_name: "qwen-3.5-35b"
@@ -56,16 +54,14 @@ model_list:
       model: "openrouter/qwen/qwen3.5-35b-a3b"
       api_key: "os.environ/OPENROUTER_API_KEY"
       extra_body:
-        chat_template_kwargs:
-          enable_thinking: false
+        enable_thinking: false  # OpenRouter: top-level, not under chat_template_kwargs
 
   - model_name: "openrouter/qwen-3.5-35b"
     litellm_params:
       model: "openrouter/qwen/qwen3.5-35b-a3b"
       api_key: "os.environ/OPENROUTER_API_KEY"
       extra_body:
-        chat_template_kwargs:
-          enable_thinking: false
+        enable_thinking: false  # OpenRouter: top-level, not under chat_template_kwargs
 
   - model_name: "deepinfra/qwen-3.5-35b"
     litellm_params:
