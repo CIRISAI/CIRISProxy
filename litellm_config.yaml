@@ -14,13 +14,27 @@ model_list:
   # Qwen 3.6-35B-A3B - PRIMARY model for CIRIS Agent (2026-04-27)
   # MoE: 35B total / 3B active params, 262K context
   # DeepInfra primary, OpenRouter backup, Groq llama-4-scout cross-model failover
+  #
+  # DRY-BY-CONSTRUCTION (2026-08-27 incident): the CIRIS Agent does NOT send its
+  # own reasoning-off extras when talking through a CIRIS proxy — see
+  # ciris_engine/.../llm_service/service.py _build_reasoning_off_extras:
+  # `if "ciris-services" in base: return {}` (it trusts the proxy to already
+  # have thinking disabled per upstream provider). That makes this file the
+  # ONLY place thinking gets disabled, so a hand-copied extra_body block that
+  # silently drifts (e.g. the wrong key, which OpenRouter just ignores rather
+  # than erroring on) goes straight to a user as 300+ second responses with no
+  # error anywhere. Fix: every alias for the same (provider, model) pair
+  # shares one YAML-anchored extra_body node (&anchor / *anchor) instead of a
+  # hand-copy — it is structurally impossible for an alias to drift, because
+  # there is only one object.
+  #
   # Qwen3 thinking disabled: DeepInfra uses chat_template_kwargs.enable_thinking=false (vLLM flag);
   # OpenRouter uses top-level extra_body.enable_thinking=false (provider API flag).
   - model_name: "qwen-3.6-35b"
     litellm_params:
       model: "deepinfra/Qwen/Qwen3.6-35B-A3B"
       api_key: "os.environ/DEEPINFRA_API_KEY"
-      extra_body:
+      extra_body: &deepinfra_qwen36_extra
         chat_template_kwargs:
           enable_thinking: false
 
@@ -28,9 +42,7 @@ model_list:
     litellm_params:
       model: "deepinfra/Qwen/Qwen3.6-35B-A3B"
       api_key: "os.environ/DEEPINFRA_API_KEY"
-      extra_body:
-        chat_template_kwargs:
-          enable_thinking: false
+      extra_body: *deepinfra_qwen36_extra
 
   - model_name: "openrouter/qwen-3.6-35b"
     litellm_params:
@@ -169,22 +181,20 @@ model_list:
 
   # Aliases for simpler client usage
   # Default model for CIRIS Agent - Qwen 3.6-35B-A3B via DeepInfra (2026-04-27)
+  # extra_body is the *anchor* alias, not a hand-copy — see DRY-BY-CONSTRUCTION above.
   - model_name: "default"
     litellm_params:
       model: "deepinfra/Qwen/Qwen3.6-35B-A3B"
       api_key: "os.environ/DEEPINFRA_API_KEY"
-      extra_body:
-        chat_template_kwargs:
-          enable_thinking: false
+      extra_body: *deepinfra_qwen36_extra
 
-  # Fast alias - Groq Qwen 3.6-27B (high-speed cross-model failover)
+  # Fast alias - Groq Qwen 3.6-27B (high-speed cross-model failover).
+  # No extra_body — Groq's qwen3.6-27b does not support/need a thinking toggle;
+  # matches the plain groq/qwen-3.6-27b entry above.
   - model_name: "fast"
     litellm_params:
       model: "groq/qwen/qwen3.6-27b"
       api_key: "os.environ/GROQ_API_KEY"
-      extra_body:
-        chat_template_kwargs:
-          enable_thinking: false
 
 litellm_settings:
   # Custom callback for CIRISBilling integration
