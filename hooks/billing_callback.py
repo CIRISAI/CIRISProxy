@@ -289,6 +289,7 @@ class CIRISBillingCallback(CustomLogger):
                 "prompt_tokens": 0,
                 "completion_tokens": 0,
                 "models": set(),
+                "providers": set(),
                 "cost_cents": 0.0,
                 "duration_ms": 0,
                 "errors": 0,
@@ -361,7 +362,10 @@ class CIRISBillingCallback(CustomLogger):
         if not external_id:
             return
 
-        # Calculate total duration from start to now
+        # Interaction wall-clock: start -> now (finalization). Finalization is
+        # triggered by the stale timeout or the call-limit trip, NOT by the last
+        # LLM call returning, so this includes agent-side and idle time. Do not
+        # read it as latency — that is what llm_duration_ms below is for.
         start_time = usage_data.get("start_time")
         if start_time:
             total_duration_ms = int(
@@ -369,6 +373,10 @@ class CIRISBillingCallback(CustomLogger):
             )
         else:
             total_duration_ms = usage_data.get("duration_ms", 0)
+
+        # Summed wall-clock of the LLM calls themselves, accumulated per call in
+        # _aggregate_usage. Previously computed and then thrown away here.
+        llm_duration_ms = usage_data.get("duration_ms", 0)
 
         try:
             client = await self._get_client()
@@ -382,8 +390,10 @@ class CIRISBillingCallback(CustomLogger):
                     "total_prompt_tokens": usage_data.get("prompt_tokens", 0),
                     "total_completion_tokens": usage_data.get("completion_tokens", 0),
                     "models_used": list(usage_data.get("models", set())),
+                    "providers_used": list(usage_data.get("providers", set())),
                     "actual_cost_cents": int(usage_data.get("cost_cents", 0)),
                     "duration_ms": total_duration_ms,
+                    "llm_duration_ms": llm_duration_ms,
                     "error_count": usage_data.get("errors", 0),
                     "fallback_count": usage_data.get("fallbacks", 0),
                 },
@@ -727,6 +737,31 @@ class CIRISBillingCallback(CustomLogger):
 
         return oauth_provider, external_id, interaction_id, metadata, litellm_params
 
+    @staticmethod
+    def _upstream_provider(response_obj: Any, actual_model: str) -> str:
+        """Best-effort name of the upstream provider that served this call.
+
+        OpenRouter reports the serving sub-provider on the response body
+        (`provider`), which is the only way to tell Venice from DeepInfra
+        behind one model id. Other vendors send nothing, so fall back to the
+        litellm routing prefix ("groq/qwen/..." -> "groq"). Never raises and
+        never returns None — attribution is best-effort telemetry and must
+        not be able to break a billing callback.
+        """
+        try:
+            provider = getattr(response_obj, "provider", None)
+            if not provider and isinstance(response_obj, dict):
+                provider = response_obj.get("provider")
+            if not provider:
+                hidden = getattr(response_obj, "_hidden_params", None)
+                if isinstance(hidden, dict):
+                    provider = hidden.get("custom_llm_provider")
+            if not provider and isinstance(actual_model, str) and "/" in actual_model:
+                provider = actual_model.split("/", 1)[0]
+            return str(provider) if provider else "unknown"
+        except Exception:  # never let telemetry break the callback
+            return "unknown"
+
     def _extract_usage_data(
         self,
         response_obj: Any,
@@ -758,12 +793,21 @@ class CIRISBillingCallback(CustomLogger):
         if start_time and end_time:
             duration_ms = int((end_time - start_time).total_seconds() * 1000)
 
+        # Upstream provider that actually served this call. On OpenRouter a
+        # single model id maps to ~10 providers whose throughput spans
+        # 22-170 tok/s, so `model` alone cannot attribute slowness. OpenRouter
+        # returns it as a top-level `provider` field; other vendors do not send
+        # one, in which case we fall back to the litellm provider prefix
+        # (e.g. "groq/qwen/..." -> "groq") so the column is never empty.
+        provider = self._upstream_provider(response_obj, actual_model)
+
         return {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "model": model,
             "actual_model": actual_model,
             "api_base": api_base,
+            "provider": provider,
             "cost_dollars": cost_dollars,
             "duration_ms": duration_ms,
         }
@@ -788,6 +832,10 @@ class CIRISBillingCallback(CustomLogger):
             "api_base": usage_data["api_base"][:50] if usage_data["api_base"] else "default",
             "prompt_tokens": usage_data["prompt_tokens"],
             "completion_tokens": usage_data["completion_tokens"],
+            # upstream provider + this call's real latency, so a slow provider
+            # is attributable from logs alone without an out-of-band benchmark
+            "provider": usage_data.get("provider", "unknown"),
+            "duration_ms": usage_data.get("duration_ms", 0),
         }
 
         if (retry_count or 0) > 0:
@@ -807,12 +855,14 @@ class CIRISBillingCallback(CustomLogger):
             )
         else:
             logger.info(
-                "llm_request interaction=%s model=%s api_base=%s tokens=%d/%d",
+                "llm_request interaction=%s model=%s api_base=%s tokens=%d/%d provider=%s dur=%dms",
                 interaction_id[:8] if interaction_id else "none",
                 usage_data["actual_model"],
                 usage_data["api_base"][:30] if usage_data["api_base"] else "default",
                 usage_data["prompt_tokens"],
                 usage_data["completion_tokens"],
+                usage_data.get("provider", "unknown"),
+                usage_data.get("duration_ms", 0),
             )
 
         _ship_log("INFO", "LLM request completed", **log_data)
@@ -904,7 +954,12 @@ class CIRISBillingCallback(CustomLogger):
         interaction_usage["prompt_tokens"] += prompt_tokens
         interaction_usage["completion_tokens"] += completion_tokens
         interaction_usage["models"].add(model)
+        interaction_usage["providers"].add(usage_data.get("provider") or "unknown")
         interaction_usage["cost_cents"] += cost_dollars * 100
+        # NOTE: this is the SUM OF LLM CALL DURATIONS — the real generation
+        # time. It is deliberately distinct from the interaction wall-clock
+        # computed in _log_interaction_usage (start -> finalization, which
+        # includes agent-side and idle time). Both are now reported.
         interaction_usage["duration_ms"] += duration_ms
 
         # Update global aggregate stats
