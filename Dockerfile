@@ -6,10 +6,17 @@
 # See: https://docs.litellm.ai/blog/security-update-march-2026
 # CVE-2026-42208 (SQLi) affects 1.81.16 - 1.83.6 — must be >= 1.83.7
 # CVE-2026-49468 (auth bypass via Host Header Injection) affects < 1.84.0 — must be >= 1.84.0
-# Image is signed with cosign - verify with:
-#   cosign verify --key https://raw.githubusercontent.com/BerriAI/litellm/main/cosign.pub ghcr.io/berriai/litellm:v1.90.0
+# CVE-2026-84377 / GHSA-3cv6-jpf6-8222 (provider-key exfiltration via request-body
+#   `fallbacks` / `model_list`) affects 1.90.0 - 1.90.6 — must be >= 1.90.7.
+#   Any signed-in app user could reach it through /v1/chat/completions.
+# Do NOT move into 1.91.0 - 1.100.3 without reading GHSA-7hp6-4w63-5g45 (salt-key
+#   privilege escalation), and never use 1.107.0 (credential stealer, 2026-10-21).
+# Pinned by DIGEST, not just tag: upstream's floating tags pointed at the 1.107.0
+# stealer image for hours on 2026-10-21, and a tag can be re-pointed. This digest
+# was inspected offline on 2026-11-12 (image built 2026-08-09; no injected .pth /
+# sitecustomize / cook.py; no stealer IOC strings). Re-inspect when bumping.
 # Note: -stable channel topped out at v1.83.14; v1.84+ are published without the suffix
-FROM ghcr.io/berriai/litellm:v1.90.0
+FROM ghcr.io/berriai/litellm:v1.90.7@sha256:917d480b7e4a7e61822e54f70be5c7cf753fb0b7328cbf6467612652ca748075
 
 # Install dependencies
 RUN python -m ensurepip && python -m pip install --no-cache-dir google-auth>=2.0.0 httpx>=0.24.0
